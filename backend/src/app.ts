@@ -383,13 +383,66 @@ export function createCareerBridgeApp(options: AppOptions = {}) {
 
   app.post("/api/webhooks/passid", async (c) => {
     const raw = await c.req.text();
-    const sig = c.req.header("PassID-Signature") ?? c.req.header("X-PassID-Signature") ?? "";
-    const timestamp = c.req.header("PassID-Timestamp") ?? c.req.header("X-PassID-Timestamp") ?? "";
-    const eventIdHeader = c.req.header("PassID-Event-Id") ?? c.req.header("X-PassID-Event-Id") ?? "";
+
+    // Try multiple header name variations to handle PassID sending different casing
+    const sig =
+      c.req.header("PassID-Signature") ??
+      c.req.header("X-PassID-Signature") ??
+      c.req.header("passid-signature") ??
+      c.req.header("x-passid-signature") ??
+      "";
+    const timestamp =
+      c.req.header("PassID-Timestamp") ??
+      c.req.header("X-PassID-Timestamp") ??
+      c.req.header("passid-timestamp") ??
+      c.req.header("x-passid-timestamp") ??
+      "";
+    const eventIdHeader =
+      c.req.header("PassID-Event-Id") ??
+      c.req.header("X-PassID-Event-Id") ??
+      c.req.header("passid-event-id") ??
+      c.req.header("x-passid-event-id") ??
+      "";
+
+    // Debug logging to help identify header/secret mismatches
+    console.log("[passid-webhook] incoming request", {
+      timestamp,
+      timestampHeader: c.req.header("PassID-Timestamp") !== undefined ? "PassID-Timestamp"
+        : c.req.header("X-PassID-Timestamp") !== undefined ? "X-PassID-Timestamp"
+        : c.req.header("passid-timestamp") !== undefined ? "passid-timestamp"
+        : c.req.header("x-passid-timestamp") !== undefined ? "x-passid-timestamp"
+        : "(none)",
+      signatureHeader: c.req.header("PassID-Signature") !== undefined ? "PassID-Signature"
+        : c.req.header("X-PassID-Signature") !== undefined ? "X-PassID-Signature"
+        : c.req.header("passid-signature") !== undefined ? "passid-signature"
+        : c.req.header("x-passid-signature") !== undefined ? "x-passid-signature"
+        : "(none)",
+      sigPrefix: sig ? sig.slice(0, 16) + "..." : "(empty)",
+      rawBodyLength: raw.length,
+    });
+
     const ts = Number(timestamp);
-    if (!ts || Math.abs(now() - ts) > 1000 * 60 * 5) return c.json({ error: "invalid_timestamp" }, 401);
+    if (!ts || Math.abs(now() - ts) > 1000 * 60 * 10) {
+      console.log("[passid-webhook] timestamp validation failed", {
+        ts,
+        nowMs: now(),
+        diffSeconds: ts ? Math.round(Math.abs(now() - ts) / 1000) : null,
+        toleranceSeconds: 600,
+      });
+      return c.json({ error: "invalid_timestamp", detail: "timestamp missing or outside 10-minute tolerance" }, 401);
+    }
+
     const expected = hmac(`${timestamp}.${raw}`, env.PASSID_WEBHOOK_SECRET);
-    if (!sig || !safeEqual(sig.replace(/^sha256=/, ""), expected)) return c.json({ error: "invalid_signature" }, 401);
+    const receivedSig = sig.replace(/^sha256=/, "");
+    console.log("[passid-webhook] signature check", {
+      expectedPrefix: expected.slice(0, 16) + "...",
+      receivedPrefix: receivedSig ? receivedSig.slice(0, 16) + "..." : "(empty)",
+      match: receivedSig === expected,
+    });
+    if (!sig || !safeEqual(receivedSig, expected)) {
+      return c.json({ error: "invalid_signature", detail: "HMAC signature does not match" }, 401);
+    }
+
     const event = JSON.parse(raw);
     const eventId = String(event.id ?? eventIdHeader ?? randomId("evt"));
     const existing = db.prepare("SELECT id FROM passid_webhook_events WHERE id=?").get(eventId);
