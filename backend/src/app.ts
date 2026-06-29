@@ -456,7 +456,9 @@ export function createCareerBridgeApp(options: AppOptions = {}) {
     const ts = timestamp ? Date.parse(timestamp) : 0; // Parse ISO string to milliseconds
     if (!ts || Math.abs(now() - ts) > 1000 * 60 * 5) return c.json({ error: "invalid_timestamp" }, 401);
     const expected = hmac(`${timestamp}.${raw}`, env.PASSID_WEBHOOK_SECRET);
-    if (!sig || !safeEqual(sig.replace(/^sha256=/, ""), expected)) return c.json({ error: "invalid_signature" }, 401);
+    const sigValue = sig.replace(/^sha256=/, "");
+    console.log("[passid webhook sig check]", { sig: sig ? "***" : "", expected: expected.substring(0, 16) + "...", sigValue: sigValue.substring(0, 16) + "...", secret: env.PASSID_WEBHOOK_SECRET ? "***" : "" });
+    if (!sig || !safeEqual(sigValue, expected)) return c.json({ error: "invalid_signature" }, 401);
     const event = JSON.parse(raw);
     const eventId = String(event.id ?? eventIdHeader ?? randomId("evt"));
     const existing = db.prepare("SELECT id FROM passid_webhook_events WHERE id=?").get(eventId);
