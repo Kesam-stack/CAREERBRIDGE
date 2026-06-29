@@ -106,7 +106,6 @@ export function createCareerBridgeApp(options: AppOptions = {}) {
   const ownedDb = options.db ? null : openCareerBridgeDb(env.DATABASE_URL);
   const db = options.db ?? ownedDb!.db;
   const passid = options.passidClient ?? createPassidClient(env);
-  const sessionCreationLocks = new Set<string>();
   const app = new Hono();
 
   app.use("*", async (c, next) => {
@@ -340,31 +339,6 @@ export function createCareerBridgeApp(options: AppOptions = {}) {
     const scopes = sanitizeScopes(requiredScopes, APPROVED_SCOPES);
     if (!scopes.length) return c.json({ error: "no_approved_scopes" }, 400);
 
-    const lockKey = `${user.id}:${appRow.id}`;
-    const existingCreatingSession = db.prepare(`
-      SELECT passid_session_id, hosted_url, expires_at, scopes
-      FROM passid_sessions
-      WHERE application_id=? AND candidate_user_id=? AND status='creating' AND expires_at > ?
-      ORDER BY created_at DESC
-      LIMIT 1
-    `).get(appRow.id, user.id, now()) as any;
-    if (existingCreatingSession) {
-      if (existingCreatingSession.hosted_url && existingCreatingSession.passid_session_id) {
-        return c.json({
-          hosted_url: existingCreatingSession.hosted_url,
-          session_id: existingCreatingSession.passid_session_id,
-          expires_at: new Date(Number(existingCreatingSession.expires_at)).toISOString(),
-          requested_scopes: jsonArray(existingCreatingSession.scopes),
-          reused: true,
-        });
-      }
-      return c.json({
-        error: "session_creation_in_progress",
-        message: "A PassID session is already being created for this application. Please retry in a moment.",
-        retry_after_seconds: 3,
-      }, 409);
-    }
-
     const existingSession = db.prepare(`
       SELECT passid_session_id, hosted_url, expires_at, scopes
       FROM passid_sessions
@@ -382,7 +356,6 @@ export function createCareerBridgeApp(options: AppOptions = {}) {
       });
     }
 
-    sessionCreationLocks.add(lockKey);
     const state = randomId("state");
     const sessionRecordId = randomId("cbsess");
     const expiresAt = now() + 1000 * 60 * 15;
@@ -396,10 +369,7 @@ export function createCareerBridgeApp(options: AppOptions = {}) {
         application_reference: appRow.id,
         state,
       });
-      if (/client_secret|secret=/i.test(created.hosted_url)) {
-        db.prepare("UPDATE passid_sessions SET status='failed' WHERE id=?").run(sessionRecordId);
-        return c.json({ error: "unsafe_hosted_url" }, 502);
-      }
+      if (/client_secret|secret=/i.test(created.hosted_url)) return c.json({ error: "unsafe_hosted_url" }, 502);
       db.prepare("UPDATE passid_sessions SET passid_session_id=?, hosted_url=?, status=? WHERE id=?")
         .run(created.session_id, created.hosted_url, created.status, sessionRecordId);
       audit(db, user.id, "passid.session.create", "application", appRow.id, { scopes, environment: env.PASSID_ENVIRONMENT });
@@ -422,8 +392,6 @@ export function createCareerBridgeApp(options: AppOptions = {}) {
         message: "Could not create a PASSID session. Please retry shortly.",
         passid_request_id: (error as any)?.requestId,
       }, status);
-    } finally {
-      sessionCreationLocks.delete(lockKey);
     }
   });
 
