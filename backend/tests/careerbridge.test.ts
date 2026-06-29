@@ -256,6 +256,29 @@ describe("CareerBridge independent PASSID institution app", () => {
     expect(res.status).toBe(200);
   });
 
+  it("returns the underlying PASSID session creation error", async () => {
+    const auth = await login(app, "amara@careerbridge.test");
+    const application = await applyToDemoJob(app, auth);
+    const failingApp = createCareerBridgeApp({
+      env: baseEnv,
+      db,
+      passidClient: {
+        async createSession() { throw new Error("PASSID_API_401: invalid credentials"); },
+        async retrieveSession() { throw new Error("not implemented"); },
+        async revokeConnection() { throw new Error("not implemented"); },
+      },
+    });
+    const res = await failingApp.app.request("/api/passid/connect/sessions", {
+      method: "POST",
+      headers: { Cookie: auth.cookie, "Content-Type": "application/json", "X-CSRF-Token": auth.csrf },
+      body: JSON.stringify({ application_id: application.id }),
+    });
+    expect(res.status).toBe(502);
+    const body = await res.json() as any;
+    expect(body.error).toBe("passid_session_failed");
+    expect(body.detail).toContain("invalid credentials");
+  });
+
   it("rejects CSRF failures and supports candidate-driven revocation", async () => {
     const auth = await login(app, "amara@careerbridge.test");
     const application = await applyToDemoJob(app, auth);

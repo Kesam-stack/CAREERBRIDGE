@@ -50,8 +50,11 @@ export function createPassidClient(env: CareerBridgeEnv): PassidClient {
     const requestId = response.headers.get("x-request-id") ?? undefined;
     const body = await response.json().catch(() => ({}));
     if (!response.ok) {
-      const err = new Error(`PASSID_API_${response.status}`);
+      const detail = body?.error ?? body?.message ?? body?.detail ?? body?.errors ?? "unknown_error";
+      const err = new Error(`PASSID_API_${response.status}:${typeof detail === "string" ? detail : JSON.stringify(detail)}`);
       (err as any).requestId = requestId;
+      (err as any).status = response.status;
+      (err as any).body = body;
       throw err;
     }
     return { body: normalizeBody(body), requestId };

@@ -29,7 +29,11 @@ export function safeEqual(a: string, b: string): boolean {
 }
 
 export function redactError(error: unknown): string {
-  if (error instanceof Error) return error.name || "Error";
+  if (error instanceof Error) {
+    const message = error.message?.trim();
+    if (!message) return error.name || "Error";
+    return message.replace(/(sk_[A-Za-z0-9_-]+|pk_[A-Za-z0-9_-]+|whsec_[A-Za-z0-9_-]+)/gi, "[REDACTED]");
+  }
   return "unknown_error";
 }
 

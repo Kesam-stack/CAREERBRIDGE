@@ -307,6 +307,10 @@ export function createCareerBridgeApp(options: AppOptions = {}) {
     const state = randomId("state");
     const sessionRecordId = randomId("cbsess");
     const expiresAt = now() + 1000 * 60 * 15;
+    const passidConfigIssue = [env.PASSID_SECRET_KEY, env.PASSID_PUBLISHABLE_KEY].some((value) => !value || /^(changeme|change-me|placeholder|secret|test|todo|example)$/i.test(value));
+    if (passidConfigIssue) {
+      return c.json({ error: "passid_not_configured", detail: "PASSID secret keys are missing or still using placeholder values" }, 502);
+    }
     db.prepare("INSERT INTO passid_sessions (id,application_id,candidate_user_id,state_hash,status,scopes,purpose,environment,expires_at,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)")
       .run(sessionRecordId, appRow.id, user.id, hmac(state, env.SESSION_SECRET), "creating", JSON.stringify(scopes), `CareerBridge application: ${appRow.title}`, env.PASSID_ENVIRONMENT, expiresAt, now());
     try {
@@ -322,9 +326,11 @@ export function createCareerBridgeApp(options: AppOptions = {}) {
         .run(created.session_id, created.hosted_url, created.status, sessionRecordId);
       audit(db, user.id, "passid.session.create", "application", appRow.id, { scopes, environment: env.PASSID_ENVIRONMENT });
       return c.json({ hosted_url: created.hosted_url, session_id: created.session_id, expires_at: created.expires_at, requested_scopes: scopes });
-    } catch {
+    } catch (error) {
+      console.error("PASSID session creation failed", error);
       db.prepare("UPDATE passid_sessions SET status='failed' WHERE id=?").run(sessionRecordId);
-      return c.json({ error: "passid_session_failed" }, 502);
+      const detail = error instanceof Error ? error.message : "unknown_error";
+      return c.json({ error: "passid_session_failed", detail }, 502);
     }
   });
 
