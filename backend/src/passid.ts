@@ -130,8 +130,6 @@ export function createPassidClient(env: CareerBridgeEnv): PassidClient {
             purpose: input.purpose,
             return_url: input.return_url,
             application_reference: input.application_reference,
-            state: input.state,
-            environment: env.PASSID_ENVIRONMENT,
           }),
         });
         return {
