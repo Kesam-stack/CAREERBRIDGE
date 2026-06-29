@@ -103,6 +103,13 @@ export function createPassidClient(env: CareerBridgeEnv): PassidClient {
       const detail = body?.error ?? body?.message ?? body?.detail ?? body?.errors ?? "unknown_error";
       const retryAfterHeader = response.headers.get("retry-after");
       const retryAfterSeconds = retryAfterHeader ? Number(retryAfterHeader) : undefined;
+      console.error("[passid error response]", { 
+        path, 
+        status: response.status, 
+        detail,
+        fullBody: body,
+        secretKeyEnd: env.PASSID_SECRET_KEY.substring(env.PASSID_SECRET_KEY.length - 10)
+      });
       const err = new Error(`PASSID_API_${response.status}:${typeof detail === "string" ? detail : JSON.stringify(detail)}`);
       (err as any).requestId = requestId;
       (err as any).status = response.status;
