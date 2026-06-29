@@ -422,11 +422,20 @@ export function createCareerBridgeApp(options: AppOptions = {}) {
     });
 
     const ts = Number(timestamp);
-    if (!ts || Math.abs(now() - ts) > 1000 * 60 * 10) {
+    const nowMs = now();
+    const nowSeconds = Math.floor(nowMs / 1000);
+    const isWithinTolerance =
+      Number.isFinite(ts) && (
+        Math.abs(nowMs - ts) <= 1000 * 60 * 10 ||
+        Math.abs(nowSeconds - ts) <= 60 * 10
+      );
+    if (!isWithinTolerance) {
       console.log("[passid-webhook] timestamp validation failed", {
         ts,
-        nowMs: now(),
-        diffSeconds: ts ? Math.round(Math.abs(now() - ts) / 1000) : null,
+        nowMs,
+        nowSeconds,
+        diffMs: Number.isFinite(ts) ? Math.abs(nowMs - ts) : null,
+        diffSeconds: Number.isFinite(ts) ? Math.abs(nowSeconds - ts) : null,
         toleranceSeconds: 600,
       });
       return c.json({ error: "invalid_timestamp", detail: "timestamp missing or outside 10-minute tolerance" }, 401);
