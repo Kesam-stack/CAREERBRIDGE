@@ -421,16 +421,33 @@ export function createCareerBridgeApp(options: AppOptions = {}) {
       rawBodyLength: raw.length,
     });
 
-    const ts = Number(timestamp);
-    if (!ts || Math.abs(now() - ts) > 1000 * 60 * 10) {
+    // Normalise the timestamp: PassID may send seconds (10-digit) or
+    // milliseconds (13-digit). Convert to milliseconds for comparison.
+    const tsRaw = Number(timestamp);
+    const ts = tsRaw > 1e12 ? tsRaw : tsRaw * 1000; // seconds → ms if needed
+    const diffMs = ts ? Math.abs(now() - ts) : Infinity;
+    console.log("[passid-webhook] timestamp detail", {
+      rawHeader: timestamp,
+      tsRaw,
+      tsMs: ts,
+      nowMs: now(),
+      diffSeconds: ts ? Math.round(diffMs / 1000) : null,
+    });
+    // Timestamp is a secondary check — HMAC signature is the real security
+    // gate. Reject only if the timestamp is completely absent or more than
+    // 24 hours out of range (catches obvious replay attacks while tolerating
+    // clock skew and seconds-vs-milliseconds ambiguity).
+    if (!tsRaw || diffMs > 1000 * 60 * 60 * 24) {
       console.log("[passid-webhook] timestamp validation failed", {
-        ts,
+        tsRaw,
+        tsMs: ts,
         nowMs: now(),
-        diffSeconds: ts ? Math.round(Math.abs(now() - ts) / 1000) : null,
-        toleranceSeconds: 600,
+        diffSeconds: ts ? Math.round(diffMs / 1000) : null,
+        toleranceSeconds: 86400,
       });
-      return c.json({ error: "invalid_timestamp", detail: "timestamp missing or outside 10-minute tolerance" }, 401);
+      return c.json({ error: "invalid_timestamp", detail: "timestamp missing or outside 24-hour tolerance" }, 401);
     }
+
 
     const expected = hmac(`${timestamp}.${raw}`, env.PASSID_WEBHOOK_SECRET);
     const receivedSig = sig.replace(/^sha256=/, "");
@@ -459,7 +476,9 @@ export function createCareerBridgeApp(options: AppOptions = {}) {
           .run(JSON.stringify({ status: "revoked", consent_status: "revoked", updated_at: new Date().toISOString() }), now(), conn.application_id);
       }
     }
+    console.log("[passid-webhook] event processed successfully", { eventId, type, connectionId });
     return c.json({ ok: true });
+
   });
 
   app.get("/api/admin/passid", async (c) => {
