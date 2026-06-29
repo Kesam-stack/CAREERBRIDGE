@@ -450,30 +450,19 @@ export function createCareerBridgeApp(options: AppOptions = {}) {
 
   app.post("/api/webhooks/passid", async (c) => {
     const raw = await c.req.text();
-    const sig = c.req.header("PassID-Signature") ?? c.req.header("X-PassID-Signature") ?? c.req.header("x-passid-signature") ?? "";
-    const timestamp = c.req.header("PassID-Timestamp") ?? c.req.header("X-PassID-Timestamp") ?? c.req.header("x-passid-timestamp") ?? "";
-    const eventIdHeader = c.req.header("PassID-Event-Id") ?? c.req.header("X-PassID-Event-Id") ?? c.req.header("x-passid-event") ?? "";
-    const ts = timestamp ? Date.parse(timestamp) : 0; // Parse ISO string to milliseconds
+    const sig = c.req.header("x-passid-signature") ?? "";
+    const timestamp = c.req.header("x-passid-timestamp") ?? "";
+    const eventIdHeader = c.req.header("x-passid-event") ?? "";
+    
+    // Validate timestamp (ISO format)
+    const ts = timestamp ? Date.parse(timestamp) : 0;
     if (!ts || Math.abs(now() - ts) > 1000 * 60 * 5) return c.json({ error: "invalid_timestamp" }, 401);
     
-    // Try different message formats to match Passid's signature
-    const msgFormats = [
-      timestamp + "." + raw,           // ISO.body
-      timestamp + raw,                  // ISO+body
-    ];
+    // Verify signature: HMAC-SHA256 of raw body only (per Passid docs)
+    const expected = hmac(raw, env.PASSID_WEBHOOK_SECRET);
+    const received = sig.replace(/^sha256=/, "");
+    if (!sig || !safeEqual(received, expected)) return c.json({ error: "invalid_signature" }, 401);
     
-    const sigValue = sig.replace(/^sha256=/, "");
-    let matched = false;
-    for (const msg of msgFormats) {
-      const expected = hmac(msg, env.PASSID_WEBHOOK_SECRET);
-      if (safeEqual(sigValue, expected)) {
-        matched = true;
-        break;
-      }
-    }
-    
-    console.log("[passid webhook sig check]", { sig: sig ? "***" : "", sigValue: sigValue.substring(0, 16) + "...", secret: env.PASSID_WEBHOOK_SECRET.substring(0, 8) + "...", matched, rawLen: raw.length, timestamp });
-    if (!sig || !matched) return c.json({ error: "invalid_signature" }, 401);
     const event = JSON.parse(raw);
     const eventId = String(event.id ?? eventIdHeader ?? randomId("evt"));
     const existing = db.prepare("SELECT id FROM passid_webhook_events WHERE id=?").get(eventId);
