@@ -364,6 +364,15 @@ export function createCareerBridgeApp(options: AppOptions = {}) {
       return c.json({ hosted_url: created.hosted_url, session_id: created.session_id, expires_at: created.expires_at, requested_scopes: scopes });
     } catch (error) {
       db.prepare("UPDATE passid_sessions SET status='failed' WHERE id=?").run(sessionRecordId);
+      const errorMsg = (error as any)?.message ?? String(error);
+      const errorBody = (error as any)?.body ?? {};
+      console.error("[passid.session.create error]", { 
+        status: (error as any)?.status,
+        code: errorBody?.error?.code,
+        message: errorBody?.error?.message,
+        detail: errorMsg,
+        requestId: (error as any)?.requestId
+      });
       const status = (error as any)?.status === 429 ? 429 : 502;
       const retryAfterSeconds = (error as any)?.retryAfterSeconds;
       if (status === 429) {
