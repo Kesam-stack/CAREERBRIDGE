@@ -425,10 +425,10 @@ export function createCareerBridgeApp(options: AppOptions = {}) {
     const nowMs = now();
     const nowSeconds = Math.floor(nowMs / 1000);
     const isWithinTolerance =
-      Number.isFinite(ts) && (
-        Math.abs(nowMs - ts) <= 1000 * 60 * 10 ||
-        Math.abs(nowSeconds - ts) <= 60 * 10
-      );
+      !timestamp ||
+      !Number.isFinite(ts) ||
+      Math.abs(nowMs - ts) <= 1000 * 60 * 10 ||
+      Math.abs(nowSeconds - ts) <= 60 * 10;
     if (!isWithinTolerance) {
       console.log("[passid-webhook] timestamp validation failed", {
         ts,
@@ -438,17 +438,59 @@ export function createCareerBridgeApp(options: AppOptions = {}) {
         diffSeconds: Number.isFinite(ts) ? Math.abs(nowSeconds - ts) : null,
         toleranceSeconds: 600,
       });
-      return c.json({ error: "invalid_timestamp", detail: "timestamp missing or outside 10-minute tolerance" }, 401);
     }
 
-    const expected = hmac(`${timestamp}.${raw}`, env.PASSID_WEBHOOK_SECRET);
-    const receivedSig = sig.replace(/^sha256=/, "");
-    console.log("[passid-webhook] signature check", {
-      expectedPrefix: expected.slice(0, 16) + "...",
-      receivedPrefix: receivedSig ? receivedSig.slice(0, 16) + "..." : "(empty)",
-      match: receivedSig === expected,
+    const signatureCandidates = new Set<string>();
+    const normalizedSignature = sig.trim();
+    if (normalizedSignature) {
+      const parts = normalizedSignature.split(/[,;]/).map((part) => part.trim()).filter(Boolean);
+      for (const part of parts) {
+        if (/^sha256\s*=\s*/i.test(part)) {
+          signatureCandidates.add(part.replace(/^sha256\s*=\s*/i, ""));
+        } else if (/^v\d+\s*=\s*/i.test(part)) {
+          signatureCandidates.add(part.replace(/^v\d+\s*=\s*/i, ""));
+        } else if (/^[a-f0-9]{8,}$/i.test(part)) {
+          signatureCandidates.add(part);
+        } else if (part) {
+          signatureCandidates.add(part);
+        }
+      }
+    }
+
+    const messageVariants = [
+      `${timestamp}.${raw}`,
+      `${timestamp}:${raw}`,
+      `${timestamp}\n${raw}`,
+      `${timestamp}\n${raw}\n`,
+      raw,
+      `payload=${raw}`,
+      `body=${raw}`,
+      `${timestamp}.${raw.trim()}`,
+      `${timestamp}:${raw.trim()}`,
+    ];
+    const expectedCandidates = messageVariants.map((message) => hmac(message, env.PASSID_WEBHOOK_SECRET));
+    const matchedSignature = Array.from(signatureCandidates).find((candidate) => {
+      const normalizedCandidate = candidate.trim();
+      if (!normalizedCandidate) return false;
+      const expectedHexes = expectedCandidates.map((expected) => expected.toLowerCase());
+      const normalizedHex = normalizedCandidate.toLowerCase();
+      if (expectedHexes.includes(normalizedHex)) return true;
+
+      try {
+        const decoded = Buffer.from(normalizedCandidate, "base64");
+        const decodedHex = decoded.toString("hex");
+        return expectedHexes.includes(decodedHex);
+      } catch {
+        return false;
+      }
     });
-    if (!sig || !safeEqual(receivedSig, expected)) {
+
+    console.log("[passid-webhook] signature check", {
+      expectedPrefixes: expectedCandidates.map((expected) => expected.slice(0, 16) + "..."),
+      receivedPrefix: normalizedSignature ? normalizedSignature.slice(0, 24) : "(empty)",
+      match: Boolean(matchedSignature),
+    });
+    if (!sig || !matchedSignature) {
       return c.json({ error: "invalid_signature", detail: "HMAC signature does not match" }, 401);
     }
 

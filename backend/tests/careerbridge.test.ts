@@ -213,6 +213,49 @@ describe("CareerBridge independent PASSID institution app", () => {
     expect(res.status).toBe(200);
   });
 
+  it("accepts webhook signatures with whitespace around the prefix", async () => {
+    db.prepare("INSERT INTO applications (id,job_id,candidate_user_id,status,created_at,updated_at) VALUES ('app_webhook_whitespace','job_demo','candidate_demo','under_review',?,?)").run(Date.now(), Date.now());
+    db.prepare("INSERT INTO passid_connections (id,application_id,candidate_user_id,passid_session_id,connection_id,status,granted_scopes,consent_status,created_at,updated_at) VALUES ('cbconn_whitespace','app_webhook_whitespace','candidate_demo','pcs_1','conn_sandbox_test_123','approved','[\"identity.read\"]','active',?,?)").run(Date.now(), Date.now());
+    const payload = JSON.stringify({ id: "evt_whitespace", type: "connection.revoked", data: { connection_id: "conn_sandbox_test_123", status: "revoked" } });
+    const ts = String(Date.now());
+    const sig = hmac(`${ts}.${payload}`, baseEnv.PASSID_WEBHOOK_SECRET);
+    const res = await app.request("/api/webhooks/passid", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "PassID-Timestamp": ts, "PassID-Signature": `sha256 = ${sig}` },
+      body: payload,
+    });
+    expect(res.status).toBe(200);
+  });
+
+  it("accepts base64-encoded webhook signatures", async () => {
+    db.prepare("INSERT INTO applications (id,job_id,candidate_user_id,status,created_at,updated_at) VALUES ('app_webhook_base64','job_demo','candidate_demo','under_review',?,?)").run(Date.now(), Date.now());
+    db.prepare("INSERT INTO passid_connections (id,application_id,candidate_user_id,passid_session_id,connection_id,status,granted_scopes,consent_status,created_at,updated_at) VALUES ('cbconn_base64','app_webhook_base64','candidate_demo','pcs_1','conn_sandbox_test_123','approved','[\"identity.read\"]','active',?,?)").run(Date.now(), Date.now());
+    const payload = JSON.stringify({ id: "evt_base64", type: "connection.revoked", data: { connection_id: "conn_sandbox_test_123", status: "revoked" } });
+    const ts = String(Date.now());
+    const sig = hmac(`${ts}.${payload}`, baseEnv.PASSID_WEBHOOK_SECRET);
+    const base64Sig = Buffer.from(sig, "hex").toString("base64");
+    const res = await app.request("/api/webhooks/passid", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "PassID-Timestamp": ts, "PassID-Signature": `sha256=${base64Sig}` },
+      body: payload,
+    });
+    expect(res.status).toBe(200);
+  });
+
+  it("accepts newline-delimited webhook signatures", async () => {
+    db.prepare("INSERT INTO applications (id,job_id,candidate_user_id,status,created_at,updated_at) VALUES ('app_webhook_newline','job_demo','candidate_demo','under_review',?,?)").run(Date.now(), Date.now());
+    db.prepare("INSERT INTO passid_connections (id,application_id,candidate_user_id,passid_session_id,connection_id,status,granted_scopes,consent_status,created_at,updated_at) VALUES ('cbconn_newline','app_webhook_newline','candidate_demo','pcs_1','conn_sandbox_test_123','approved','[\"identity.read\"]','active',?,?)").run(Date.now(), Date.now());
+    const payload = JSON.stringify({ id: "evt_newline", type: "connection.revoked", data: { connection_id: "conn_sandbox_test_123", status: "revoked" } });
+    const ts = String(Date.now());
+    const sig = hmac(`${ts}\n${payload}`, baseEnv.PASSID_WEBHOOK_SECRET);
+    const res = await app.request("/api/webhooks/passid", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "PassID-Timestamp": ts, "PassID-Signature": `sha256=${sig}` },
+      body: payload,
+    });
+    expect(res.status).toBe(200);
+  });
+
   it("rejects CSRF failures and supports candidate-driven revocation", async () => {
     const auth = await login(app, "amara@careerbridge.test");
     const application = await applyToDemoJob(app, auth);
