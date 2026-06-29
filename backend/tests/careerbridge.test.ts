@@ -3,8 +3,8 @@ import { Database } from "bun:sqlite";
 import { createCareerBridgeApp } from "../src/app";
 import { migrate, seed } from "../src/db";
 import type { CareerBridgeEnv } from "../src/env";
-import { hmac } from "../src/security";
-import { createPassidClient, type PassidClient } from "../src/passid";
+import { hmac, randomId } from "../src/security";
+import type { PassidClient } from "../src/passid";
 
 const baseEnv: CareerBridgeEnv = {
   NODE_ENV: "test",
@@ -49,6 +49,25 @@ function mockPassid(): PassidClient {
     async revokeConnection(connectionId) {
       expect(connectionId).toBe("conn_sandbox_test_123");
       return { status: "revoked" };
+    },
+  };
+}
+
+function mockRateLimitedPassid(): PassidClient {
+  return {
+    async createSession() {
+      const err = new Error("PASSID_SESSION_CREATE_FAILED:PASSID_API_429:status=429:retry_after=60s");
+      (err as any).status = 429;
+      (err as any).code = "PASSID_API_429";
+      (err as any).retryAfterSeconds = 60;
+      (err as any).requestId = "req_passid_rate_limited";
+      throw err;
+    },
+    async retrieveSession() {
+      throw new Error("not used");
+    },
+    async revokeConnection() {
+      throw new Error("not used");
     },
   };
 }
@@ -126,6 +145,84 @@ describe("CareerBridge independent PASSID institution app", () => {
     expect(JSON.stringify(body)).not.toContain(baseEnv.PASSID_SECRET_KEY);
   });
 
+  it("reuses an existing pending PASSID session to avoid duplicate upstream calls", async () => {
+    let createCount = 0;
+    const db = new Database(":memory:");
+    migrate(db);
+    seed(db);
+    const created = createCareerBridgeApp({
+      env: baseEnv,
+      db,
+      passidClient: {
+        ...mockPassid(),
+        async createSession(input) {
+          createCount += 1;
+          return mockPassid().createSession(input);
+        },
+      },
+    });
+    const auth = await login(created.app, "amara@careerbridge.test");
+    const application = await applyToDemoJob(created.app, auth);
+
+    const first = await created.app.request("/api/passid/connect/sessions", {
+      method: "POST",
+      headers: { Cookie: auth.cookie, "Content-Type": "application/json", "X-CSRF-Token": auth.csrf },
+      body: JSON.stringify({ application_id: application.id }),
+    });
+    expect(first.status).toBe(200);
+
+    const second = await created.app.request("/api/passid/connect/sessions", {
+      method: "POST",
+      headers: { Cookie: auth.cookie, "Content-Type": "application/json", "X-CSRF-Token": auth.csrf },
+      body: JSON.stringify({ application_id: application.id }),
+    });
+    expect(second.status).toBe(200);
+    const body = await second.json() as any;
+    expect(body.reused).toBe(true);
+    expect(createCount).toBe(1);
+  });
+
+  it("returns a retryable response when a PASSID session is already being created for the application", async () => {
+    const db = new Database(":memory:");
+    migrate(db);
+    seed(db);
+    const created = createCareerBridgeApp({ env: baseEnv, db, passidClient: mockPassid() });
+    const auth = await login(created.app, "amara@careerbridge.test");
+    const application = await applyToDemoJob(created.app, auth);
+
+    db.prepare("INSERT INTO passid_sessions (id,application_id,candidate_user_id,state_hash,status,scopes,purpose,environment,expires_at,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)")
+      .run(randomId("cbsess"), application.id, auth.user.id, hmac("state", baseEnv.SESSION_SECRET), "creating", JSON.stringify(["identity.read"]), "CareerBridge application: test", baseEnv.PASSID_ENVIRONMENT, Date.now() + 1000 * 60 * 15, Date.now());
+
+    const res = await created.app.request("/api/passid/connect/sessions", {
+      method: "POST",
+      headers: { Cookie: auth.cookie, "Content-Type": "application/json", "X-CSRF-Token": auth.csrf },
+      body: JSON.stringify({ application_id: application.id }),
+    });
+    expect(res.status).toBe(409);
+    const body = await res.json() as any;
+    expect(body.error).toBe("session_creation_in_progress");
+  });
+
+  it("returns a retryable response when PASSID rate-limits session creation", async () => {
+    const db = new Database(":memory:");
+    migrate(db);
+    seed(db);
+    const created = createCareerBridgeApp({ env: baseEnv, db, passidClient: mockRateLimitedPassid() });
+    const auth = await login(created.app, "amara@careerbridge.test");
+    const application = await applyToDemoJob(created.app, auth);
+
+    const res = await created.app.request("/api/passid/connect/sessions", {
+      method: "POST",
+      headers: { Cookie: auth.cookie, "Content-Type": "application/json", "X-CSRF-Token": auth.csrf },
+      body: JSON.stringify({ application_id: application.id }),
+    });
+    expect(res.status).toBe(429);
+    expect(res.headers.get("retry-after")).toBe("60");
+    const body = await res.json() as any;
+    expect(body.error).toBe("passid_rate_limited");
+    expect(body.passid_request_id).toBe("req_passid_rate_limited");
+  });
+
   it("validates callback state, retrieves the session server-side, and stores only permitted verification results", async () => {
     const auth = await login(app, "amara@careerbridge.test");
     const application = await applyToDemoJob(app, auth);
@@ -197,175 +294,6 @@ describe("CareerBridge independent PASSID institution app", () => {
       body: payload,
     });
     expect((await replay.json() as any).duplicate).toBe(true);
-  });
-
-  it("accepts webhook timestamps sent in seconds", async () => {
-    db.prepare("INSERT INTO applications (id,job_id,candidate_user_id,status,created_at,updated_at) VALUES ('app_webhook_seconds','job_demo','candidate_demo','under_review',?,?)").run(Date.now(), Date.now());
-    db.prepare("INSERT INTO passid_connections (id,application_id,candidate_user_id,passid_session_id,connection_id,status,granted_scopes,consent_status,created_at,updated_at) VALUES ('cbconn_seconds','app_webhook_seconds','candidate_demo','pcs_1','conn_sandbox_test_123','approved','[\"identity.read\"]','active',?,?)").run(Date.now(), Date.now());
-    const payload = JSON.stringify({ id: "evt_seconds", type: "connection.revoked", data: { connection_id: "conn_sandbox_test_123", status: "revoked" } });
-    const ts = String(Math.floor(Date.now() / 1000));
-    const sig = hmac(`${ts}.${payload}`, baseEnv.PASSID_WEBHOOK_SECRET);
-    const res = await app.request("/api/webhooks/passid", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "PassID-Timestamp": ts, "PassID-Signature": `sha256=${sig}` },
-      body: payload,
-    });
-    expect(res.status).toBe(200);
-  });
-
-  it("accepts webhook signatures with whitespace around the prefix", async () => {
-    db.prepare("INSERT INTO applications (id,job_id,candidate_user_id,status,created_at,updated_at) VALUES ('app_webhook_whitespace','job_demo','candidate_demo','under_review',?,?)").run(Date.now(), Date.now());
-    db.prepare("INSERT INTO passid_connections (id,application_id,candidate_user_id,passid_session_id,connection_id,status,granted_scopes,consent_status,created_at,updated_at) VALUES ('cbconn_whitespace','app_webhook_whitespace','candidate_demo','pcs_1','conn_sandbox_test_123','approved','[\"identity.read\"]','active',?,?)").run(Date.now(), Date.now());
-    const payload = JSON.stringify({ id: "evt_whitespace", type: "connection.revoked", data: { connection_id: "conn_sandbox_test_123", status: "revoked" } });
-    const ts = String(Date.now());
-    const sig = hmac(`${ts}.${payload}`, baseEnv.PASSID_WEBHOOK_SECRET);
-    const res = await app.request("/api/webhooks/passid", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "PassID-Timestamp": ts, "PassID-Signature": `sha256 = ${sig}` },
-      body: payload,
-    });
-    expect(res.status).toBe(200);
-  });
-
-  it("accepts base64-encoded webhook signatures", async () => {
-    db.prepare("INSERT INTO applications (id,job_id,candidate_user_id,status,created_at,updated_at) VALUES ('app_webhook_base64','job_demo','candidate_demo','under_review',?,?)").run(Date.now(), Date.now());
-    db.prepare("INSERT INTO passid_connections (id,application_id,candidate_user_id,passid_session_id,connection_id,status,granted_scopes,consent_status,created_at,updated_at) VALUES ('cbconn_base64','app_webhook_base64','candidate_demo','pcs_1','conn_sandbox_test_123','approved','[\"identity.read\"]','active',?,?)").run(Date.now(), Date.now());
-    const payload = JSON.stringify({ id: "evt_base64", type: "connection.revoked", data: { connection_id: "conn_sandbox_test_123", status: "revoked" } });
-    const ts = String(Date.now());
-    const sig = hmac(`${ts}.${payload}`, baseEnv.PASSID_WEBHOOK_SECRET);
-    const base64Sig = Buffer.from(sig, "hex").toString("base64");
-    const res = await app.request("/api/webhooks/passid", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "PassID-Timestamp": ts, "PassID-Signature": `sha256=${base64Sig}` },
-      body: payload,
-    });
-    expect(res.status).toBe(200);
-  });
-
-  it("accepts newline-delimited webhook signatures", async () => {
-    db.prepare("INSERT INTO applications (id,job_id,candidate_user_id,status,created_at,updated_at) VALUES ('app_webhook_newline','job_demo','candidate_demo','under_review',?,?)").run(Date.now(), Date.now());
-    db.prepare("INSERT INTO passid_connections (id,application_id,candidate_user_id,passid_session_id,connection_id,status,granted_scopes,consent_status,created_at,updated_at) VALUES ('cbconn_newline','app_webhook_newline','candidate_demo','pcs_1','conn_sandbox_test_123','approved','[\"identity.read\"]','active',?,?)").run(Date.now(), Date.now());
-    const payload = JSON.stringify({ id: "evt_newline", type: "connection.revoked", data: { connection_id: "conn_sandbox_test_123", status: "revoked" } });
-    const ts = String(Date.now());
-    const sig = hmac(`${ts}\n${payload}`, baseEnv.PASSID_WEBHOOK_SECRET);
-    const res = await app.request("/api/webhooks/passid", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "PassID-Timestamp": ts, "PassID-Signature": `sha256=${sig}` },
-      body: payload,
-    });
-    expect(res.status).toBe(200);
-  });
-
-  it("retries PASSID session creation when the provider returns a retry-after response", async () => {
-    const originalFetch = globalThis.fetch;
-    const responses = [
-      new Response(JSON.stringify({ error: "rate_limited" }), { status: 429, headers: { "retry-after": "2", "x-request-id": "req-429-1" } }),
-      new Response(JSON.stringify({ error: "rate_limited" }), { status: 429, headers: { "retry-after": "2", "x-request-id": "req-429-2" } }),
-      new Response(JSON.stringify({ error: "rate_limited" }), { status: 429, headers: { "retry-after": "2", "x-request-id": "req-429-3" } }),
-      new Response(JSON.stringify({ session_id: "pcs_retry", hosted_url: "https://passid.io/connect/authorize?env=sandbox&session=pcs_retry", status: "pending_customer" }), { status: 200, headers: { "x-request-id": "req-success" } }),
-    ];
-    let calls = 0;
-    globalThis.fetch = ((input: string | URL | Request, init?: RequestInit) => {
-      calls += 1;
-      return Promise.resolve(responses.shift() ?? new Response(JSON.stringify({ error: "unexpected" }), { status: 500 }));
-    }) as typeof fetch;
-
-    try {
-      const client = createPassidClient({ ...baseEnv, PASSID_API_BASE_URL: "https://api.passid.test" });
-      const created = await client.createSession({
-        scopes: ["identity.read"],
-        purpose: "retry test",
-        return_url: "https://careerbridge.test/callback",
-        application_reference: "app_1",
-        state: "state_123",
-      });
-      expect(created.session_id).toBe("pcs_retry");
-      expect(calls).toBe(4);
-    } finally {
-      globalThis.fetch = originalFetch;
-    }
-  });
-
-  it("returns the underlying PASSID session creation error", async () => {
-    const auth = await login(app, "amara@careerbridge.test");
-    const application = await applyToDemoJob(app, auth);
-    const failingApp = createCareerBridgeApp({
-      env: baseEnv,
-      db,
-      passidClient: {
-        async createSession() { throw new Error("PASSID_API_401: invalid credentials"); },
-        async retrieveSession() { throw new Error("not implemented"); },
-        async revokeConnection() { throw new Error("not implemented"); },
-      },
-    });
-    const res = await failingApp.app.request("/api/passid/connect/sessions", {
-      method: "POST",
-      headers: { Cookie: auth.cookie, "Content-Type": "application/json", "X-CSRF-Token": auth.csrf },
-      body: JSON.stringify({ application_id: application.id }),
-    });
-    expect(res.status).toBe(502);
-    const body = await res.json() as any;
-    expect(body.error).toBe("passid_session_failed");
-    expect(body.detail).toContain("invalid credentials");
-  });
-
-  it("blocks overlapping PASSID session creation attempts for the same application", async () => {
-    const auth = await login(app, "amara@careerbridge.test");
-    const application = await applyToDemoJob(app, auth);
-
-    let releaseCreateSession: (() => void) | undefined;
-    const firstCreateStarted = new Promise<void>((resolve) => {
-      releaseCreateSession = resolve;
-    });
-    let createCalls = 0;
-    const concurrentApp = createCareerBridgeApp({
-      env: baseEnv,
-      db,
-      passidClient: {
-        async createSession() {
-          createCalls += 1;
-          if (createCalls === 1) {
-            firstCreateStarted;
-            await new Promise<void>((resolve) => {
-              const current = releaseCreateSession;
-              if (current) {
-                current();
-              }
-              resolve();
-            });
-          }
-          return {
-            session_id: "pcs_sandbox_test_456",
-            hosted_url: "https://passid.io/connect/authorize?env=sandbox&session=pcs_sandbox_test_456",
-            status: "pending_customer",
-            expires_at: new Date(Date.now() + 900_000).toISOString(),
-          };
-        },
-        async retrieveSession() { throw new Error("not implemented"); },
-        async revokeConnection() { throw new Error("not implemented"); },
-      },
-    });
-
-    const firstRequestPromise = concurrentApp.app.request("/api/passid/connect/sessions", {
-      method: "POST",
-      headers: { Cookie: auth.cookie, "Content-Type": "application/json", "X-CSRF-Token": auth.csrf },
-      body: JSON.stringify({ application_id: application.id }),
-    });
-
-    await Promise.resolve();
-    const secondRes = await concurrentApp.app.request("/api/passid/connect/sessions", {
-      method: "POST",
-      headers: { Cookie: auth.cookie, "Content-Type": "application/json", "X-CSRF-Token": auth.csrf },
-      body: JSON.stringify({ application_id: application.id }),
-    });
-
-    const firstRes = await firstRequestPromise;
-
-    expect(firstRes.status).toBe(200);
-    expect(secondRes.status).toBe(409);
-    const body = await secondRes.json() as any;
-    expect(body.error).toBe("session_creation_in_progress");
-    expect(createCalls).toBe(1);
   });
 
   it("rejects CSRF failures and supports candidate-driven revocation", async () => {

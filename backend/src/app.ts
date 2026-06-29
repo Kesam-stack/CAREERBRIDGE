@@ -7,7 +7,7 @@ import { join, normalize, extname } from "path";
 import { openCareerBridgeDb, type Role } from "./db";
 import { getEnvironmentIssues, loadEnv, safeVersion, type CareerBridgeEnv } from "./env";
 import { createPassidClient, type PassidClient } from "./passid";
-import { hashPassword, hmac, randomId, safeEqual, sanitizeScopes, verifyPassword, redactError } from "./security";
+import { hashPassword, hmac, randomId, safeEqual, sanitizeScopes, verifyPassword } from "./security";
 
 const APPROVED_SCOPES = [
   "identity.read",
@@ -57,27 +57,6 @@ function jsonArray(value: unknown): string[] {
 
 function now() {
   return Date.now();
-}
-
-function normalizeWebhookSignature(signature: string): string {
-  const trimmed = (signature ?? "").trim();
-  const withoutPrefix = trimmed.replace(/^sha256\s*=\s*/i, "").trim();
-  return withoutPrefix.replace(/\s+/g, "");
-}
-
-function verifyWebhookSignature(signature: string, timestamp: string, payload: string, secret: string): boolean {
-  const normalized = normalizeWebhookSignature(signature);
-  if (!normalized) return false;
-  const expectedHex = hmac(`${timestamp}.${payload}`, secret);
-  const expectedNewlineHex = hmac(`${timestamp}\n${payload}`, secret);
-  const candidates = [expectedHex, expectedNewlineHex];
-  try {
-    const decodedHex = Buffer.from(normalized, "base64").toString("hex");
-    if (decodedHex) candidates.push(decodedHex);
-  } catch {
-    // ignore malformed base64 payloads
-  }
-  return candidates.some((candidate) => safeEqual(normalized, candidate) || safeEqual(Buffer.from(normalized, "base64").toString("hex"), candidate));
 }
 
 function audit(db: Database, actor: string | null, action: string, targetType: string, targetId: string, detail: Record<string, unknown>) {
@@ -362,20 +341,20 @@ export function createCareerBridgeApp(options: AppOptions = {}) {
     if (!scopes.length) return c.json({ error: "no_approved_scopes" }, 400);
 
     const lockKey = `${user.id}:${appRow.id}`;
-    if (sessionCreationLocks.has(lockKey)) {
-      const ready = db.prepare(`
-        SELECT passid_session_id, hosted_url, expires_at, scopes
-        FROM passid_sessions
-        WHERE application_id=? AND candidate_user_id=? AND hosted_url IS NOT NULL AND expires_at > ? AND status != 'failed'
-        ORDER BY created_at DESC
-        LIMIT 1
-      `).get(appRow.id, user.id, now()) as any;
-      if (ready?.hosted_url && ready?.passid_session_id) {
+    const existingCreatingSession = db.prepare(`
+      SELECT passid_session_id, hosted_url, expires_at, scopes
+      FROM passid_sessions
+      WHERE application_id=? AND candidate_user_id=? AND status='creating' AND expires_at > ?
+      ORDER BY created_at DESC
+      LIMIT 1
+    `).get(appRow.id, user.id, now()) as any;
+    if (existingCreatingSession) {
+      if (existingCreatingSession.hosted_url && existingCreatingSession.passid_session_id) {
         return c.json({
-          hosted_url: ready.hosted_url,
-          session_id: ready.passid_session_id,
-          expires_at: new Date(Number(ready.expires_at)).toISOString(),
-          requested_scopes: jsonArray(ready.scopes),
+          hosted_url: existingCreatingSession.hosted_url,
+          session_id: existingCreatingSession.passid_session_id,
+          expires_at: new Date(Number(existingCreatingSession.expires_at)).toISOString(),
+          requested_scopes: jsonArray(existingCreatingSession.scopes),
           reused: true,
         });
       }
@@ -403,21 +382,6 @@ export function createCareerBridgeApp(options: AppOptions = {}) {
       });
     }
 
-    const inProgressSession = db.prepare(`
-      SELECT id, passid_session_id, hosted_url, expires_at, scopes
-      FROM passid_sessions
-      WHERE application_id=? AND candidate_user_id=? AND status='creating' AND expires_at > ?
-      ORDER BY created_at DESC
-      LIMIT 1
-    `).get(appRow.id, user.id, now()) as any;
-    if (inProgressSession && !inProgressSession.hosted_url) {
-      return c.json({
-        error: "session_creation_in_progress",
-        message: "A PassID session is already being created for this application. Please retry in a moment.",
-        retry_after_seconds: 3,
-      }, 409);
-    }
-
     sessionCreationLocks.add(lockKey);
     const state = randomId("state");
     const sessionRecordId = randomId("cbsess");
@@ -432,7 +396,10 @@ export function createCareerBridgeApp(options: AppOptions = {}) {
         application_reference: appRow.id,
         state,
       });
-      if (/client_secret|secret=/i.test(created.hosted_url)) return c.json({ error: "unsafe_hosted_url" }, 502);
+      if (/client_secret|secret=/i.test(created.hosted_url)) {
+        db.prepare("UPDATE passid_sessions SET status='failed' WHERE id=?").run(sessionRecordId);
+        return c.json({ error: "unsafe_hosted_url" }, 502);
+      }
       db.prepare("UPDATE passid_sessions SET passid_session_id=?, hosted_url=?, status=? WHERE id=?")
         .run(created.session_id, created.hosted_url, created.status, sessionRecordId);
       audit(db, user.id, "passid.session.create", "application", appRow.id, { scopes, environment: env.PASSID_ENVIRONMENT });
@@ -440,22 +407,19 @@ export function createCareerBridgeApp(options: AppOptions = {}) {
     } catch (error) {
       db.prepare("UPDATE passid_sessions SET status='failed' WHERE id=?").run(sessionRecordId);
       const status = (error as any)?.status === 429 ? 429 : 502;
-      const retryAfterSeconds = (error as any)?.retryAfterSeconds ?? (error as any)?.body?.retry_after_seconds;
-      const detail = (error as any)?.body?.error ?? (error as any)?.body?.message ?? (error as any)?.body?.detail ?? redactError(error);
+      const retryAfterSeconds = (error as any)?.retryAfterSeconds;
       if (status === 429) {
         if (retryAfterSeconds != null) c.header("Retry-After", String(retryAfterSeconds));
         return c.json({
           error: "passid_rate_limited",
           message: "PASSID is rate limiting session creation. Please retry shortly.",
           retry_after_seconds: retryAfterSeconds ?? 60,
-          detail,
           passid_request_id: (error as any)?.requestId,
         }, 429);
       }
       return c.json({
         error: "passid_session_failed",
         message: "Could not create a PASSID session. Please retry shortly.",
-        detail,
         passid_request_id: (error as any)?.requestId,
       }, status);
     } finally {
@@ -521,10 +485,10 @@ export function createCareerBridgeApp(options: AppOptions = {}) {
     const sig = c.req.header("PassID-Signature") ?? c.req.header("X-PassID-Signature") ?? "";
     const timestamp = c.req.header("PassID-Timestamp") ?? c.req.header("X-PassID-Timestamp") ?? "";
     const eventIdHeader = c.req.header("PassID-Event-Id") ?? c.req.header("X-PassID-Event-Id") ?? "";
-    const parsedTimestamp = Number(timestamp);
-    const normalizedTimestamp = Number.isFinite(parsedTimestamp) && String(timestamp).length <= 10 ? parsedTimestamp * 1000 : parsedTimestamp;
-    if (!Number.isFinite(normalizedTimestamp) || Math.abs(now() - normalizedTimestamp) > 1000 * 60 * 5) return c.json({ error: "invalid_timestamp" }, 401);
-    if (!verifyWebhookSignature(sig, timestamp, raw, env.PASSID_WEBHOOK_SECRET)) return c.json({ error: "invalid_signature" }, 401);
+    const ts = Number(timestamp);
+    if (!ts || Math.abs(now() - ts) > 1000 * 60 * 5) return c.json({ error: "invalid_timestamp" }, 401);
+    const expected = hmac(`${timestamp}.${raw}`, env.PASSID_WEBHOOK_SECRET);
+    if (!sig || !safeEqual(sig.replace(/^sha256=/, ""), expected)) return c.json({ error: "invalid_signature" }, 401);
     const event = JSON.parse(raw);
     const eventId = String(event.id ?? eventIdHeader ?? randomId("evt"));
     const existing = db.prepare("SELECT id FROM passid_webhook_events WHERE id=?").get(eventId);
