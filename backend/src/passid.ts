@@ -38,7 +38,7 @@ function normalizeBody(body: any): any {
 
 export function createPassidClient(env: CareerBridgeEnv): PassidClient {
   const base = env.PASSID_API_BASE_URL.replace(/\/+$/, "");
-  async function request(path: string, init: RequestInit = {}) {
+  async function request(path: string, init: RequestInit = {}, attempt = 0): Promise<{ body: any; requestId?: string }> {
     const response = await fetch(`${base}${path}`, {
       ...init,
       headers: {
@@ -49,6 +49,12 @@ export function createPassidClient(env: CareerBridgeEnv): PassidClient {
     });
     const requestId = response.headers.get("x-request-id") ?? undefined;
     const body = await response.json().catch(() => ({}));
+    if (response.status === 429 && attempt < 3) {
+      const delayMs = 250 * (attempt + 1);
+      console.warn(`[passid] rate limited, retrying in ${delayMs}ms`, { path, attempt, requestId, detail: body?.error ?? body?.message ?? body?.detail });
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+      return request(path, init, attempt + 1);
+    }
     if (!response.ok) {
       const detail = body?.error ?? body?.message ?? body?.detail ?? body?.errors ?? "unknown_error";
       const err = new Error(`PASSID_API_${response.status}:${typeof detail === "string" ? detail : JSON.stringify(detail)}`);
