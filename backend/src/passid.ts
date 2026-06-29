@@ -87,7 +87,11 @@ export function createPassidClient(env: CareerBridgeEnv): PassidClient {
           expires_at: body.expires_at,
         };
       } catch (error) {
-        throw new Error(`PASSID_SESSION_CREATE_FAILED:${redactError(error)}`);
+        const wrapped = new Error(`PASSID_SESSION_CREATE_FAILED:${redactError(error)}`);
+        (wrapped as any).status = (error as any)?.status;
+        (wrapped as any).requestId = (error as any)?.requestId;
+        (wrapped as any).body = (error as any)?.body;
+        throw wrapped;
       }
     },
     async retrieveSession(sessionId) {
@@ -103,7 +107,11 @@ export function createPassidClient(env: CareerBridgeEnv): PassidClient {
           request_id: requestId,
         };
       } catch (error) {
-        throw new Error(`PASSID_SESSION_RETRIEVE_FAILED:${redactError(error)}`);
+        const wrapped = new Error(`PASSID_SESSION_RETRIEVE_FAILED:${redactError(error)}`);
+        (wrapped as any).status = (error as any)?.status;
+        (wrapped as any).requestId = (error as any)?.requestId;
+        (wrapped as any).body = (error as any)?.body;
+        throw wrapped;
       }
     },
     async revokeConnection(connectionId) {
@@ -111,7 +119,11 @@ export function createPassidClient(env: CareerBridgeEnv): PassidClient {
         const { body } = await request(`/v1/connect/connections/${encodeURIComponent(connectionId)}/revoke`, { method: "POST" });
         return { status: body.status ?? "revoked" };
       } catch (error) {
-        throw new Error(`PASSID_REVOKE_FAILED:${redactError(error)}`);
+        const wrapped = new Error(`PASSID_REVOKE_FAILED:${redactError(error)}`);
+        (wrapped as any).status = (error as any)?.status;
+        (wrapped as any).requestId = (error as any)?.requestId;
+        (wrapped as any).body = (error as any)?.body;
+        throw wrapped;
       }
     },
   };

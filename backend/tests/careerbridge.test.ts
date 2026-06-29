@@ -279,6 +279,65 @@ describe("CareerBridge independent PASSID institution app", () => {
     expect(body.detail).toContain("invalid credentials");
   });
 
+  it("blocks overlapping PASSID session creation attempts for the same application", async () => {
+    const auth = await login(app, "amara@careerbridge.test");
+    const application = await applyToDemoJob(app, auth);
+
+    let releaseCreateSession: (() => void) | undefined;
+    const firstCreateStarted = new Promise<void>((resolve) => {
+      releaseCreateSession = resolve;
+    });
+    let createCalls = 0;
+    const concurrentApp = createCareerBridgeApp({
+      env: baseEnv,
+      db,
+      passidClient: {
+        async createSession() {
+          createCalls += 1;
+          if (createCalls === 1) {
+            firstCreateStarted;
+            await new Promise<void>((resolve) => {
+              const current = releaseCreateSession;
+              if (current) {
+                current();
+              }
+              resolve();
+            });
+          }
+          return {
+            session_id: "pcs_sandbox_test_456",
+            hosted_url: "https://passid.io/connect/authorize?env=sandbox&session=pcs_sandbox_test_456",
+            status: "pending_customer",
+            expires_at: new Date(Date.now() + 900_000).toISOString(),
+          };
+        },
+        async retrieveSession() { throw new Error("not implemented"); },
+        async revokeConnection() { throw new Error("not implemented"); },
+      },
+    });
+
+    const firstRequestPromise = concurrentApp.app.request("/api/passid/connect/sessions", {
+      method: "POST",
+      headers: { Cookie: auth.cookie, "Content-Type": "application/json", "X-CSRF-Token": auth.csrf },
+      body: JSON.stringify({ application_id: application.id }),
+    });
+
+    await Promise.resolve();
+    const secondRes = await concurrentApp.app.request("/api/passid/connect/sessions", {
+      method: "POST",
+      headers: { Cookie: auth.cookie, "Content-Type": "application/json", "X-CSRF-Token": auth.csrf },
+      body: JSON.stringify({ application_id: application.id }),
+    });
+
+    const firstRes = await firstRequestPromise;
+
+    expect(firstRes.status).toBe(200);
+    expect(secondRes.status).toBe(409);
+    const body = await secondRes.json() as any;
+    expect(body.error).toBe("session_creation_in_progress");
+    expect(createCalls).toBe(1);
+  });
+
   it("rejects CSRF failures and supports candidate-driven revocation", async () => {
     const auth = await login(app, "amara@careerbridge.test");
     const application = await applyToDemoJob(app, auth);
