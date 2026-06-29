@@ -440,7 +440,7 @@ export function createCareerBridgeApp(options: AppOptions = {}) {
     } catch (error) {
       db.prepare("UPDATE passid_sessions SET status='failed' WHERE id=?").run(sessionRecordId);
       const status = (error as any)?.status === 429 ? 429 : 502;
-      const retryAfterSeconds = (error as any)?.retryAfterSeconds;
+      const retryAfterSeconds = (error as any)?.retryAfterSeconds ?? (error as any)?.body?.retry_after_seconds;
       const detail = (error as any)?.body?.error ?? (error as any)?.body?.message ?? (error as any)?.body?.detail ?? redactError(error);
       if (status === 429) {
         if (retryAfterSeconds != null) c.header("Retry-After", String(retryAfterSeconds));

@@ -50,17 +50,23 @@ export function createPassidClient(env: CareerBridgeEnv): PassidClient {
     const requestId = response.headers.get("x-request-id") ?? undefined;
     const body = await response.json().catch(() => ({}));
     if (response.status === 429 && attempt < 3) {
-      const delayMs = 250 * (attempt + 1);
-      console.warn(`[passid] rate limited, retrying in ${delayMs}ms`, { path, attempt, requestId, detail: body?.error ?? body?.message ?? body?.detail });
+      const retryAfterHeader = response.headers.get("retry-after");
+      const retryAfterSeconds = retryAfterHeader ? Number(retryAfterHeader) : undefined;
+      const requestedDelayMs = retryAfterSeconds != null && Number.isFinite(retryAfterSeconds) ? retryAfterSeconds * 1000 : 250 * (attempt + 1);
+      const delayMs = Math.min(1000, requestedDelayMs);
+      console.warn(`[passid] rate limited, retrying in ${delayMs}ms`, { path, attempt, requestId, detail: body?.error ?? body?.message ?? body?.detail, retryAfterSeconds });
       await new Promise((resolve) => setTimeout(resolve, delayMs));
       return request(path, init, attempt + 1);
     }
     if (!response.ok) {
       const detail = body?.error ?? body?.message ?? body?.detail ?? body?.errors ?? "unknown_error";
+      const retryAfterHeader = response.headers.get("retry-after");
+      const retryAfterSeconds = retryAfterHeader ? Number(retryAfterHeader) : undefined;
       const err = new Error(`PASSID_API_${response.status}:${typeof detail === "string" ? detail : JSON.stringify(detail)}`);
       (err as any).requestId = requestId;
       (err as any).status = response.status;
       (err as any).body = body;
+      (err as any).retryAfterSeconds = Number.isFinite(retryAfterSeconds) ? retryAfterSeconds : undefined;
       throw err;
     }
     return { body: normalizeBody(body), requestId };

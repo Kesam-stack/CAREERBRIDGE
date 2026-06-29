@@ -4,7 +4,7 @@ import { createCareerBridgeApp } from "../src/app";
 import { migrate, seed } from "../src/db";
 import type { CareerBridgeEnv } from "../src/env";
 import { hmac } from "../src/security";
-import type { PassidClient } from "../src/passid";
+import { createPassidClient, type PassidClient } from "../src/passid";
 
 const baseEnv: CareerBridgeEnv = {
   NODE_ENV: "test",
@@ -254,6 +254,36 @@ describe("CareerBridge independent PASSID institution app", () => {
       body: payload,
     });
     expect(res.status).toBe(200);
+  });
+
+  it("retries PASSID session creation when the provider returns a retry-after response", async () => {
+    const originalFetch = globalThis.fetch;
+    const responses = [
+      new Response(JSON.stringify({ error: "rate_limited" }), { status: 429, headers: { "retry-after": "2", "x-request-id": "req-429-1" } }),
+      new Response(JSON.stringify({ error: "rate_limited" }), { status: 429, headers: { "retry-after": "2", "x-request-id": "req-429-2" } }),
+      new Response(JSON.stringify({ error: "rate_limited" }), { status: 429, headers: { "retry-after": "2", "x-request-id": "req-429-3" } }),
+      new Response(JSON.stringify({ session_id: "pcs_retry", hosted_url: "https://passid.io/connect/authorize?env=sandbox&session=pcs_retry", status: "pending_customer" }), { status: 200, headers: { "x-request-id": "req-success" } }),
+    ];
+    let calls = 0;
+    globalThis.fetch = ((input: string | URL | Request, init?: RequestInit) => {
+      calls += 1;
+      return Promise.resolve(responses.shift() ?? new Response(JSON.stringify({ error: "unexpected" }), { status: 500 }));
+    }) as typeof fetch;
+
+    try {
+      const client = createPassidClient({ ...baseEnv, PASSID_API_BASE_URL: "https://api.passid.test" });
+      const created = await client.createSession({
+        scopes: ["identity.read"],
+        purpose: "retry test",
+        return_url: "https://careerbridge.test/callback",
+        application_reference: "app_1",
+        state: "state_123",
+      });
+      expect(created.session_id).toBe("pcs_retry");
+      expect(calls).toBe(4);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
 
   it("returns the underlying PASSID session creation error", async () => {
