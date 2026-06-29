@@ -1,0 +1,19 @@
+{
+  "name": "careerbridge-backend",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "bun --hot src/index.ts",
+    "start": "bun run src/index.ts",
+    "test": "bun test",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "hono": "4.6.0",
+    "zod": "4.1.11"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "5.8.3"
+  }
+}

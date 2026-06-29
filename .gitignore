@@ -1,0 +1,8 @@
+backend/node_modules/
+web/node_modules/
+web/dist/
+database/*.db
+database/*.db-shm
+database/*.db-wal
+.env
+.env.local

@@ -1,0 +1,13 @@
+{
+  "name": "careerbridge",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "bun --cwd backend dev",
+    "start": "bun --cwd backend start",
+    "build": "bun --cwd web build",
+    "test": "bun --cwd backend test",
+    "typecheck": "bun --cwd backend typecheck && bun --cwd web typecheck",
+    "smoke": "node web/scripts/smoke-careerbridge.mjs"
+  }
+}
