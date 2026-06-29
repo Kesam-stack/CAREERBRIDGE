@@ -455,10 +455,25 @@ export function createCareerBridgeApp(options: AppOptions = {}) {
     const eventIdHeader = c.req.header("PassID-Event-Id") ?? c.req.header("X-PassID-Event-Id") ?? c.req.header("x-passid-event") ?? "";
     const ts = timestamp ? Date.parse(timestamp) : 0; // Parse ISO string to milliseconds
     if (!ts || Math.abs(now() - ts) > 1000 * 60 * 5) return c.json({ error: "invalid_timestamp" }, 401);
-    const expected = hmac(`${timestamp}.${raw}`, env.PASSID_WEBHOOK_SECRET);
+    
+    // Try different message formats to match Passid's signature
+    const msgFormats = [
+      timestamp + "." + raw,           // ISO.body
+      timestamp + raw,                  // ISO+body
+    ];
+    
     const sigValue = sig.replace(/^sha256=/, "");
-    console.log("[passid webhook sig check]", { sig: sig ? "***" : "", expected: expected.substring(0, 16) + "...", sigValue: sigValue.substring(0, 16) + "...", secret: env.PASSID_WEBHOOK_SECRET ? "***" : "" });
-    if (!sig || !safeEqual(sigValue, expected)) return c.json({ error: "invalid_signature" }, 401);
+    let matched = false;
+    for (const msg of msgFormats) {
+      const expected = hmac(msg, env.PASSID_WEBHOOK_SECRET);
+      if (safeEqual(sigValue, expected)) {
+        matched = true;
+        break;
+      }
+    }
+    
+    console.log("[passid webhook sig check]", { sig: sig ? "***" : "", sigValue: sigValue.substring(0, 16) + "...", secret: env.PASSID_WEBHOOK_SECRET.substring(0, 8) + "...", matched, rawLen: raw.length, timestamp });
+    if (!sig || !matched) return c.json({ error: "invalid_signature" }, 401);
     const event = JSON.parse(raw);
     const eventId = String(event.id ?? eventIdHeader ?? randomId("evt"));
     const existing = db.prepare("SELECT id FROM passid_webhook_events WHERE id=?").get(eventId);
