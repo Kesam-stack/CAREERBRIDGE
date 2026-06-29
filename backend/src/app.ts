@@ -11,30 +11,18 @@ import { hashPassword, hmac, randomId, safeEqual, sanitizeScopes, verifyPassword
 
 const APPROVED_SCOPES = [
   "identity.read",
-  "education.read",
-  "employment.read",
-  "work_authorization.read",
-  "account_ownership.read",
-  "payout_readiness.read",
+  "verification_status.read",
+  "accounts.read",
   "income.read",
-  "business_verification.read",
-  "marketplace_uniqueness.read",
-  "duplicate_account_risk.read",
-  "credential.summary",
+  "risk_flags.read",
 ];
 
 const REQUIREMENT_TO_SCOPE: Record<string, string> = {
   identity_verified: "identity.read",
-  education_credential: "education.read",
-  employment_credential: "employment.read",
-  work_authorization: "work_authorization.read",
-  account_ownership: "account_ownership.read",
-  payout_readiness: "payout_readiness.read",
   income_verification: "income.read",
-  business_verification: "business_verification.read",
-  marketplace_uniqueness: "marketplace_uniqueness.read",
-  duplicate_account_risk: "duplicate_account_risk.read",
-  custom_passid_credential: "credential.summary",
+  work_authorization: "verification_status.read",
+  account_ownership: "accounts.read",
+  risk_assessment: "risk_flags.read",
 };
 
 export interface AppOptions {
