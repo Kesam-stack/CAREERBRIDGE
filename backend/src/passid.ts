@@ -76,10 +76,12 @@ export function createPassidClient(env: CareerBridgeEnv): PassidClient {
     await passidSemaphore.acquire();
     let response: Response;
     try {
+      const authHeader = `Bearer ${env.PASSID_SECRET_KEY}`;
+      console.log("[passid request]", { path, attempt, secretKeyStart: env.PASSID_SECRET_KEY.substring(0, 20) });
       response = await fetch(`${base}${path}`, {
         ...init,
         headers: {
-          Authorization: `Bearer ${env.PASSID_SECRET_KEY}`,
+          Authorization: authHeader,
           "Content-Type": "application/json",
           ...(init.headers ?? {}),
         },
