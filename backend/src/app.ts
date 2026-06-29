@@ -421,5 +421,30 @@ export function createCareerBridgeApp(options: AppOptions = {}) {
     return c.json({ environment: env.PASSID_ENVIRONMENT, connections, events });
   });
 
+  const DIST_DIR = "/app/web/dist";
+
+  app.get("*", async (c) => {
+    const url = new URL(c.req.url);
+    const pathname = url.pathname;
+
+    // Try to serve the exact file from the dist directory
+    const filePath = `${DIST_DIR}${pathname === "/" ? "/index.html" : pathname}`;
+    const file = Bun.file(filePath);
+
+    if (await file.exists()) {
+      return new Response(file);
+    }
+
+    // SPA fallback: serve index.html for any path that doesn't match a file
+    const indexFile = Bun.file(`${DIST_DIR}/index.html`);
+    if (await indexFile.exists()) {
+      return new Response(indexFile, {
+        headers: { "Content-Type": "text/html; charset=utf-8" },
+      });
+    }
+
+    return c.json({ error: "not_found" }, 404);
+  });
+
   return { app, db, close: () => ownedDb?.close() };
 }
