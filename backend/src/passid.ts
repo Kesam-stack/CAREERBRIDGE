@@ -1,6 +1,29 @@
 import type { CareerBridgeEnv } from "./env";
 import { redactError } from "./security";
 
+// Limit concurrent Passid API calls to prevent rate limiting under load.
+class Semaphore {
+  private queue: Array<() => void> = [];
+  private running = 0;
+  constructor(private readonly concurrency: number) {}
+  acquire(): Promise<void> {
+    if (this.running < this.concurrency) {
+      this.running++;
+      return Promise.resolve();
+    }
+    return new Promise<void>((resolve) => {
+      this.queue.push(() => { this.running++; resolve(); });
+    });
+  }
+  release(): void {
+    this.running--;
+    const next = this.queue.shift();
+    if (next) next();
+  }
+}
+
+const passidSemaphore = new Semaphore(2);
+
 export interface CreatePassidSessionInput {
   scopes: string[];
   purpose: string;
@@ -38,22 +61,38 @@ function normalizeBody(body: any): any {
 
 export function createPassidClient(env: CareerBridgeEnv): PassidClient {
   const base = env.PASSID_API_BASE_URL.replace(/\/+$/, "");
+  const MAX_RETRIES = 8;
+  function backoffMs(attempt: number, retryAfterSeconds?: number): number {
+    if (retryAfterSeconds != null && Number.isFinite(retryAfterSeconds) && retryAfterSeconds > 0) {
+      return retryAfterSeconds * 1000;
+    }
+    // Exponential backoff: 500ms * 2^attempt, capped at 30s, with ±25% jitter
+    const base = Math.min(30_000, 500 * Math.pow(2, attempt));
+    const jitter = base * 0.25 * (Math.random() * 2 - 1);
+    return Math.max(100, Math.round(base + jitter));
+  }
+
   async function request(path: string, init: RequestInit = {}, attempt = 0): Promise<{ body: any; requestId?: string }> {
-    const response = await fetch(`${base}${path}`, {
-      ...init,
-      headers: {
-        Authorization: `Bearer ${env.PASSID_SECRET_KEY}`,
-        "Content-Type": "application/json",
-        ...(init.headers ?? {}),
-      },
-    });
+    await passidSemaphore.acquire();
+    let response: Response;
+    try {
+      response = await fetch(`${base}${path}`, {
+        ...init,
+        headers: {
+          Authorization: `Bearer ${env.PASSID_SECRET_KEY}`,
+          "Content-Type": "application/json",
+          ...(init.headers ?? {}),
+        },
+      });
+    } finally {
+      passidSemaphore.release();
+    }
     const requestId = response.headers.get("x-request-id") ?? undefined;
     const body = await response.json().catch(() => ({}));
-    if (response.status === 429 && attempt < 3) {
+    if (response.status === 429 && attempt < MAX_RETRIES) {
       const retryAfterHeader = response.headers.get("retry-after");
       const retryAfterSeconds = retryAfterHeader ? Number(retryAfterHeader) : undefined;
-      const requestedDelayMs = retryAfterSeconds != null && Number.isFinite(retryAfterSeconds) ? retryAfterSeconds * 1000 : 250 * (attempt + 1);
-      const delayMs = Math.min(1000, requestedDelayMs);
+      const delayMs = backoffMs(attempt, retryAfterSeconds);
       console.warn(`[passid] rate limited, retrying in ${delayMs}ms`, { path, attempt, requestId, detail: body?.error ?? body?.message ?? body?.detail, retryAfterSeconds });
       await new Promise((resolve) => setTimeout(resolve, delayMs));
       return request(path, init, attempt + 1);
