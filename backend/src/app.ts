@@ -453,8 +453,13 @@ export function createCareerBridgeApp(options: AppOptions = {}) {
     const sig = c.req.header("PassID-Signature") ?? c.req.header("X-PassID-Signature") ?? "";
     const timestamp = c.req.header("PassID-Timestamp") ?? c.req.header("X-PassID-Timestamp") ?? "";
     const eventIdHeader = c.req.header("PassID-Event-Id") ?? c.req.header("X-PassID-Event-Id") ?? "";
+    console.log("[passid webhook] headers:", { timestamp, sig: sig ? "***" : "", eventIdHeader });
     const ts = Number(timestamp) * 1000; // Passid sends seconds; convert to milliseconds
-    if (!ts || Math.abs(now() - ts) > 1000 * 60 * 5) return c.json({ error: "invalid_timestamp" }, 401);
+    console.log("[passid webhook] ts:", ts, "now:", now(), "diff:", Math.abs(now() - ts));
+    if (!ts || Math.abs(now() - ts) > 1000 * 60 * 5) {
+      console.warn("[passid webhook] rejected: invalid_timestamp");
+      return c.json({ error: "invalid_timestamp" }, 401);
+    }
     const expected = hmac(`${timestamp}.${raw}`, env.PASSID_WEBHOOK_SECRET);
     if (!sig || !safeEqual(sig.replace(/^sha256=/, ""), expected)) return c.json({ error: "invalid_signature" }, 401);
     const event = JSON.parse(raw);
