@@ -450,17 +450,11 @@ export function createCareerBridgeApp(options: AppOptions = {}) {
 
   app.post("/api/webhooks/passid", async (c) => {
     const raw = await c.req.text();
-    console.log("[passid webhook] all headers:", Object.fromEntries(c.req.raw.headers));
-    const sig = c.req.header("PassID-Signature") ?? c.req.header("X-PassID-Signature") ?? "";
-    const timestamp = c.req.header("PassID-Timestamp") ?? c.req.header("X-PassID-Timestamp") ?? "";
-    const eventIdHeader = c.req.header("PassID-Event-Id") ?? c.req.header("X-PassID-Event-Id") ?? "";
-    console.log("[passid webhook] parsed headers:", { timestamp, sig: sig ? "***" : "", eventIdHeader });
-    const ts = timestamp ? Number(timestamp) * 1000 : 0;
-    console.log("[passid webhook] ts:", ts, "now:", now(), "diff:", Math.abs(now() - ts));
-    if (!ts || Math.abs(now() - ts) > 1000 * 60 * 5) {
-      console.warn("[passid webhook] rejected: invalid_timestamp", { ts, now: now() });
-      return c.json({ error: "invalid_timestamp" }, 401);
-    }
+    const sig = c.req.header("PassID-Signature") ?? c.req.header("X-PassID-Signature") ?? c.req.header("x-passid-signature") ?? "";
+    const timestamp = c.req.header("PassID-Timestamp") ?? c.req.header("X-PassID-Timestamp") ?? c.req.header("x-passid-timestamp") ?? "";
+    const eventIdHeader = c.req.header("PassID-Event-Id") ?? c.req.header("X-PassID-Event-Id") ?? c.req.header("x-passid-event") ?? "";
+    const ts = timestamp ? Date.parse(timestamp) : 0; // Parse ISO string to milliseconds
+    if (!ts || Math.abs(now() - ts) > 1000 * 60 * 5) return c.json({ error: "invalid_timestamp" }, 401);
     const expected = hmac(`${timestamp}.${raw}`, env.PASSID_WEBHOOK_SECRET);
     if (!sig || !safeEqual(sig.replace(/^sha256=/, ""), expected)) return c.json({ error: "invalid_signature" }, 401);
     const event = JSON.parse(raw);
