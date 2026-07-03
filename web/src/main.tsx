@@ -175,6 +175,7 @@ function Landing({ auth }: { auth: any }) {
           <div className="hero-actions">
             <Link className="button" to="/jobs">Find opportunities <ChevronRight size={17} /></Link>
             <Link className="button secondary" to="/signup">Create account</Link>
+            <Link className="button secondary" to="/employer/signup">Employer sign up</Link>
             <Link className="button secondary" to="/employer/dashboard">Employer workspace</Link>
           </div>
           <div className="hero-points">
@@ -230,7 +231,7 @@ function Login({ auth }: { auth: any }) {
   return <AuthCard title="Log in" onSubmit={submit} error={error}>
     <input value={email} onChange={(e) => setEmail(e.target.value)} placeholder="Email" />
     <input value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Password" type="password" />
-    <button className="button">Log in securely</button>
+    <button className="button" type="submit">Log in securely</button>
     <p className="auth-link-row">No account yet? <Link to="/signup">Create one now</Link></p>
     <DemoLogins />
   </AuthCard>;
@@ -250,11 +251,12 @@ function Signup({ auth, forcedRole }: { auth: any; forcedRole?: string }) {
     navigate(body.user.role === "employer" ? "/employer/dashboard" : body.user.role === "admin" ? "/admin/passid" : "/dashboard");
   }
   return <AuthCard title={forcedRole === "employer" ? "Employer registration" : "Create your profile"} onSubmit={submit} error={error}>
-    <input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="Full name" aria-label="Full name" />
-    <input value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} placeholder="Email" />
-    <input value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} placeholder="Password" type="password" />
-    {!forcedRole && <select value={form.role} onChange={(e) => setForm({ ...form, role: e.target.value })}><option value="candidate">Candidate</option><option value="employer">Employer</option><option value="university">University partner</option></select>}
-    <button className="button">Create account</button>
+    <input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="Full name" aria-label="Full name" required minLength={2} />
+    <input value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} placeholder="Email" type="email" required />
+    <input value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} placeholder="Password" type="password" required minLength={10} />
+    {!forcedRole && <select value={form.role} onChange={(e) => setForm({ ...form, role: e.target.value })} required><option value="candidate">Candidate</option><option value="employer">Employer</option><option value="university">University partner</option></select>}
+    <button className="button" type="submit">Create account</button>
+    <div className="notice">Example names: Amara Okafor, Daniel Rivera, and Priya Chen.</div>
     <p className="auth-link-row">Already have an account? <Link to="/login">Log in</Link></p>
   </AuthCard>;
 }
@@ -417,7 +419,7 @@ function NewJob({ auth }: { auth: any }) {
       <textarea name="skills" placeholder="Required skills" />
       <div className="check-grid">{Object.entries(requirementLabels).map(([key, label]) => <label key={key}><input type="checkbox" name="verification_requirements" value={key} defaultChecked={key === "identity_verified"} />{label}</label>)}</div>
       <select name="status"><option>draft</option><option>published</option></select>
-      <button className="button">Publish job</button>
+      <button className="button" type="submit">Publish job</button>
       {created && <div className="notice">{created}</div>}
     </form>
   </section>;

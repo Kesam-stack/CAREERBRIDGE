@@ -128,6 +128,41 @@ describe("CareerBridge independent PASSID institution app", () => {
     expect(JSON.stringify(body)).not.toContain("sk_test");
   });
 
+  it("signs up a new user, returns a session, and logs out cleanly", async () => {
+    const email = `new.user.${Date.now()}@careerbridge.test`;
+    const signup = await app.request("/api/auth/signup", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name: "New User",
+        email,
+        password: "CareerBridgeDemo!2026",
+        role: "candidate",
+      }),
+    });
+
+    expect(signup.status).toBe(201);
+    const signupBody = await signup.json() as any;
+    expect(signupBody.user.email).toBe(email);
+    expect(signupBody.user.name).toBe("New User");
+    const cookie = signup.headers.get("set-cookie")!.split(";")[0];
+
+    const me = await app.request("/api/auth/me", { headers: { Cookie: cookie } });
+    expect(me.status).toBe(200);
+    const meBody = await me.json() as any;
+    expect(meBody.user.email).toBe(email);
+
+    const logout = await app.request("/api/auth/logout", {
+      method: "POST",
+      headers: { Cookie: cookie, "Content-Type": "application/json", "X-CSRF-Token": signupBody.csrf },
+    });
+    expect(logout.status).toBe(200);
+    expect(await logout.json()).toEqual({ ok: true });
+
+    const afterLogout = await app.request("/api/auth/me", { headers: { Cookie: cookie } });
+    expect(await afterLogout.json()).toEqual({ user: null });
+  });
+
   it("allows candidates to apply and creates a server-side PASSID session without leaking secrets", async () => {
     const auth = await login(app, "amara@careerbridge.test");
     const application = await applyToDemoJob(app, auth);
