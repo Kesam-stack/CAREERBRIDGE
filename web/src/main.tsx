@@ -103,6 +103,17 @@ function App() {
 }
 
 function Shell({ auth, loading, children }: { auth: any; loading: boolean; children: React.ReactNode }) {
+  const navigate = useNavigate();
+  async function logout() {
+    const res = await api("/api/auth/logout", { method: "POST" }, auth.csrf);
+    if (res.ok) {
+      auth.setUser(null);
+      auth.setCsrf("");
+      await auth.refresh();
+      navigate("/");
+    }
+  }
+
   return (
     <div className="app-shell">
       <aside className="sidebar">
@@ -134,7 +145,17 @@ function Shell({ auth, loading, children }: { auth: any; loading: boolean; child
           </div>
           <div className="topbar-actions">
             <Link className="button secondary" to="/jobs">Browse jobs</Link>
-            {auth.user ? <Link className="button" to="/settings">Settings</Link> : <Link className="button" to="/login">Log in</Link>}
+            {auth.user ? (
+              <>
+                <Link className="button secondary" to="/settings">Settings</Link>
+                <button className="button" onClick={logout}>Log out</button>
+              </>
+            ) : (
+              <>
+                <Link className="button secondary" to="/signup">Sign up</Link>
+                <Link className="button" to="/login">Log in</Link>
+              </>
+            )}
           </div>
         </header>
         {children}
@@ -153,6 +174,7 @@ function Landing({ auth }: { auth: any }) {
           <p>A production-style opportunity marketplace where candidates control PASSID-powered identity, credential, and financial-trust verification before employers review applications.</p>
           <div className="hero-actions">
             <Link className="button" to="/jobs">Find opportunities <ChevronRight size={17} /></Link>
+            <Link className="button secondary" to="/signup">Create account</Link>
             <Link className="button secondary" to="/employer/dashboard">Employer workspace</Link>
           </div>
           <div className="hero-points">
@@ -184,7 +206,7 @@ function Landing({ auth }: { auth: any }) {
 }
 
 function DemoLogins() {
-  return <div className="notice">Demo users: amara@careerbridge.test, recruiter@careerbridge.test, admin@careerbridge.test with password CareerBridgeDemo!2026.</div>;
+  return <div className="notice">Demo users: Amara Okafor, Daniel Rivera, and Priya Chen. Use amara@careerbridge.test, recruiter@careerbridge.test, or admin@careerbridge.test with password CareerBridgeDemo!2026.</div>;
 }
 
 function Metric({ icon, label, value }: { icon: React.ReactNode; label: string; value: string }) {
@@ -209,6 +231,7 @@ function Login({ auth }: { auth: any }) {
     <input value={email} onChange={(e) => setEmail(e.target.value)} placeholder="Email" />
     <input value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Password" type="password" />
     <button className="button">Log in securely</button>
+    <p className="auth-link-row">No account yet? <Link to="/signup">Create one now</Link></p>
     <DemoLogins />
   </AuthCard>;
 }
@@ -227,11 +250,12 @@ function Signup({ auth, forcedRole }: { auth: any; forcedRole?: string }) {
     navigate(body.user.role === "employer" ? "/employer/dashboard" : body.user.role === "admin" ? "/admin/passid" : "/dashboard");
   }
   return <AuthCard title={forcedRole === "employer" ? "Employer registration" : "Create your profile"} onSubmit={submit} error={error}>
-    <input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="Full name" />
+    <input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="Full name" aria-label="Full name" />
     <input value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} placeholder="Email" />
     <input value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} placeholder="Password" type="password" />
     {!forcedRole && <select value={form.role} onChange={(e) => setForm({ ...form, role: e.target.value })}><option value="candidate">Candidate</option><option value="employer">Employer</option><option value="university">University partner</option></select>}
     <button className="button">Create account</button>
+    <p className="auth-link-row">Already have an account? <Link to="/login">Log in</Link></p>
   </AuthCard>;
 }
 

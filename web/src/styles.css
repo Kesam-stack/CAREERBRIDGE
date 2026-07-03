@@ -92,6 +92,8 @@ label { display: grid; gap: 6px; color: #42546b; font-size: 13px; font-weight: 7
 .feature-card p, .empty-state p { margin: 0; color: #52657d; line-height: 1.65; }
 .loading-block { display: inline-flex; align-items: center; gap: 10px; color: #42546b; padding: 16px 4px; }
 .spinner { width: 16px; height: 16px; border-radius: 999px; border: 2px solid rgba(15, 118, 110, .2); border-top-color: #0f766e; animation: spin .8s linear infinite; }
+.auth-link-row { margin: 0; color: #52657d; font-size: 13px; line-height: 1.5; }
+.auth-link-row a { color: #0f766e; font-weight: 800; }
 @keyframes spin { to { transform: rotate(360deg); } }
 @media (max-width: 920px) {
   .app-shell { grid-template-columns: 1fr; }
