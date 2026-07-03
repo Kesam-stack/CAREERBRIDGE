@@ -185,7 +185,9 @@ function Signup({ auth, forcedRole }: { auth: any; forcedRole?: string }) {
     const res = await api("/api/auth/signup", { method: "POST", body: JSON.stringify(form) });
     const body = await res.json();
     if (!res.ok) return setError(body.error ?? "Signup failed");
-    navigate("/login");
+    auth.setUser(body.user);
+    auth.setCsrf(body.csrf ?? "");
+    navigate(body.user.role === "employer" ? "/employer/dashboard" : body.user.role === "admin" ? "/admin/passid" : "/dashboard");
   }
   return <AuthCard title={forcedRole === "employer" ? "Employer registration" : "Create your profile"} onSubmit={submit} error={error}>
     <input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="Full name" />
@@ -286,7 +288,11 @@ function EmployerDashboard({ auth }: { auth: any }) {
 }
 
 function EmployerJobs({ auth }: { auth: any }) {
-  return <section className="page"><PageTitle title="Employer jobs" subtitle="Create and manage opportunities." /><Link className="button" to="/employer/jobs/new">Create job</Link><Jobs auth={auth} /></section>;
+  const [jobs, setJobs] = useState<Job[]>([]);
+  useEffect(() => { api("/api/employer/jobs").then((r) => r.json()).then((b) => setJobs(b.jobs ?? [])); }, []);
+  return <section className="page"><PageTitle title="Employer jobs" subtitle="Create and manage opportunities." /><Link className="button" to="/employer/jobs/new">Create job</Link>
+    <div className="job-list">{jobs.map((job) => <JobCard job={job} key={job.id} />)}</div>
+  </section>;
 }
 
 function NewJob({ auth }: { auth: any }) {
@@ -299,7 +305,7 @@ function NewJob({ auth }: { auth: any }) {
     payload.verification_requirements = verification_requirements;
     const res = await api("/api/employer/jobs", { method: "POST", body: JSON.stringify(payload) }, auth.csrf);
     const body = await res.json();
-    setCreated(res.ok ? `Created ${body.id}` : body.error);
+    setCreated(res.ok ? `Created ${body.id}. It appears on your employer jobs page if published.` : body.error);
   }
   return <section className="page"><PageTitle title="Create job" subtitle="Choose only verification requirements supported by CareerBridge's PASSID package." />
     <form className="form-grid" onSubmit={submit}>

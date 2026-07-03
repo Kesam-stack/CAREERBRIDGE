@@ -163,8 +163,12 @@ export function createCareerBridgeApp(options: AppOptions = {}) {
         db.prepare("INSERT INTO organizations (id,owner_user_id,name,type,status,created_at) VALUES (?,?,?,?,?,?)")
           .run(randomId("org"), id, `${body.name}'s organization`, body.role === "university" ? "university" : "employer", "pending", now());
       }
+      const sessionId = randomId("sess");
+      const csrf = randomId("csrf");
+      db.prepare("INSERT INTO sessions (id,user_id,csrf,expires_at,created_at) VALUES (?,?,?,?,?)").run(sessionId, id, csrf, now() + 1000 * 60 * 60 * 8, now());
+      setCookie(c, "cb_session", sessionId, { httpOnly: true, secure: env.NODE_ENV === "production", sameSite: "Lax", path: "/", maxAge: 60 * 60 * 8 });
       audit(db, id, "user.signup", "user", id, { role: body.role });
-      return c.json({ user: { id, email: body.email.toLowerCase(), role: body.role, name: body.name } }, 201);
+      return c.json({ user: { id, email: body.email.toLowerCase(), role: body.role, name: body.name }, csrf }, 201);
     } catch {
       return c.json({ error: "email_unavailable" }, 409);
     }
@@ -237,6 +241,24 @@ export function createCareerBridgeApp(options: AppOptions = {}) {
     const job = db.prepare("SELECT j.*, o.name AS organization_name FROM jobs j JOIN organizations o ON o.id = j.organization_id WHERE j.id = ?").get(c.req.param("id")) as any;
     if (!job) return c.json({ error: "not_found" }, 404);
     return c.json({ job: { ...job, verification_requirements: jsonArray(job.verification_requirements) } });
+  });
+
+  app.get("/api/employer/jobs", async (c) => {
+    const user = await requireUser(c, ["employer", "admin"]);
+    if (user instanceof Response) return user;
+    const rows = user.role === "admin"
+      ? db.prepare(`
+          SELECT j.*, o.name AS organization_name
+          FROM jobs j JOIN organizations o ON o.id = j.organization_id
+          ORDER BY j.created_at DESC
+        `).all()
+      : db.prepare(`
+          SELECT j.*, o.name AS organization_name
+          FROM jobs j JOIN organizations o ON o.id = j.organization_id
+          WHERE o.owner_user_id = ?
+          ORDER BY j.created_at DESC
+        `).all(user.id);
+    return c.json({ jobs: rows.map((job: any) => ({ ...job, verification_requirements: jsonArray(job.verification_requirements) })) });
   });
 
   app.post("/api/employer/jobs", async (c) => {
@@ -328,12 +350,15 @@ export function createCareerBridgeApp(options: AppOptions = {}) {
     if (!scopes.length) return c.json({ error: "no_approved_scopes" }, 400);
 
     const existingSession = db.prepare(`
-      SELECT passid_session_id, hosted_url, expires_at, scopes
+      SELECT passid_session_id, hosted_url, expires_at, scopes, status
       FROM passid_sessions
-      WHERE application_id=? AND candidate_user_id=? AND hosted_url IS NOT NULL AND expires_at > ? AND status != 'failed'
+      WHERE application_id=? AND candidate_user_id=? AND expires_at > ? AND status != 'failed'
       ORDER BY created_at DESC
       LIMIT 1
     `).get(appRow.id, user.id, now()) as any;
+    if (existingSession?.status === "creating") {
+      return c.json({ error: "session_creation_in_progress" }, 409);
+    }
     if (existingSession?.hosted_url && existingSession?.passid_session_id) {
       return c.json({
         hosted_url: existingSession.hosted_url,
@@ -447,16 +472,14 @@ export function createCareerBridgeApp(options: AppOptions = {}) {
 
   app.post("/api/webhooks/passid", async (c) => {
     const raw = await c.req.text();
-    const sig = c.req.header("x-passid-signature") ?? "";
-    const timestamp = c.req.header("x-passid-timestamp") ?? "";
-    const eventIdHeader = c.req.header("x-passid-event") ?? "";
-    
-    // Validate timestamp (ISO format)
-    const ts = timestamp ? Date.parse(timestamp) : 0;
+    const sig = c.req.header("x-passid-signature") ?? c.req.header("PassID-Signature") ?? "";
+    const timestamp = c.req.header("x-passid-timestamp") ?? c.req.header("PassID-Timestamp") ?? "";
+    const eventIdHeader = c.req.header("x-passid-event") ?? c.req.header("PassID-Event") ?? "";
+
+    const ts = /^\d+$/.test(timestamp) ? Number(timestamp) : Date.parse(timestamp);
     if (!ts || Math.abs(now() - ts) > 1000 * 60 * 5) return c.json({ error: "invalid_timestamp" }, 401);
-    
-    // Verify signature: HMAC-SHA256 of raw body only (per Passid docs)
-    const expected = hmac(raw, env.PASSID_WEBHOOK_SECRET);
+
+    const expected = hmac(`${timestamp}.${raw}`, env.PASSID_WEBHOOK_SECRET);
     const received = sig.replace(/^sha256=/, "");
     if (!sig || !safeEqual(received, expected)) return c.json({ error: "invalid_signature" }, 401);
     

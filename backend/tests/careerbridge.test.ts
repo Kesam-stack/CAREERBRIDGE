@@ -307,4 +307,69 @@ describe("CareerBridge independent PASSID institution app", () => {
     expect(ok.status).toBe(200);
     expect((await ok.json() as any).status).toBe("revoked");
   });
+
+  it("creates a new account and signs the user in immediately", async () => {
+    const res = await app.request("/api/auth/signup", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        email: "new.candidate@careerbridge.test",
+        password: "A-valid-password-2026",
+        name: "New Candidate",
+        role: "candidate",
+      }),
+    });
+
+    expect(res.status).toBe(201);
+    const body = await res.json() as any;
+    expect(body.user.email).toBe("new.candidate@careerbridge.test");
+    expect(body.user.role).toBe("candidate");
+    expect(body.csrf).toBeTruthy();
+    expect(res.headers.get("set-cookie")).toContain("cb_session=");
+
+    const cookie = res.headers.get("set-cookie")!.split(";")[0];
+    const me = await app.request("/api/auth/me", {
+      headers: { Cookie: cookie },
+    });
+    expect(me.status).toBe(200);
+    const meBody = await me.json() as any;
+    expect(meBody.user.email).toBe("new.candidate@careerbridge.test");
+
+    const profile = await app.request("/api/profile", {
+      headers: { Cookie: cookie },
+    });
+    expect(profile.status).toBe(200);
+    const profileBody = await profile.json() as any;
+    expect(profileBody.profile.user_id).toBe(body.user.id);
+  });
+
+  it("lets employers post a published job and see it in their job list", async () => {
+    const employer = await login(app, "recruiter@careerbridge.test", "employer");
+    const create = await app.request("/api/employer/jobs", {
+      method: "POST",
+      headers: { Cookie: employer.cookie, "Content-Type": "application/json", "X-CSRF-Token": employer.csrf },
+      body: JSON.stringify({
+        title: "Operations Associate",
+        location: "Remote",
+        work_mode: "remote",
+        employment_type: "full-time",
+        compensation: "$70,000",
+        description: "Run trust and operations work for a fast-growing marketplace with clear verification controls.",
+        skills: "operations, SQL, communication",
+        verification_requirements: ["identity_verified", "account_ownership"],
+        status: "published",
+      }),
+    });
+
+    expect(create.status).toBe(201);
+    const created = await create.json() as any;
+    const employerJobs = await app.request("/api/employer/jobs", { headers: { Cookie: employer.cookie } });
+    expect(employerJobs.status).toBe(200);
+    const owned = await employerJobs.json() as any;
+    expect(owned.jobs.some((job: any) => job.id === created.id && job.status === "published")).toBe(true);
+
+    const publicJobs = await app.request("/api/jobs");
+    const publicBody = await publicJobs.json() as any;
+    expect(publicBody.jobs.some((job: any) => job.id === created.id)).toBe(true);
+  });
 });
