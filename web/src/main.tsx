@@ -34,6 +34,27 @@ function api(path: string, options: RequestInit = {}, csrf?: string) {
   });
 }
 
+function safeList<T>(value: T[] | undefined | null) {
+  return Array.isArray(value) ? value : [];
+}
+
+function initials(name: string) {
+  return name
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((part) => part[0]?.toUpperCase())
+    .join("") || "CB";
+}
+
+function titleCase(value: string) {
+  return value
+    .split(/[_\-\s]+/)
+    .filter(Boolean)
+    .map((part) => part[0]?.toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
 function App() {
   const [user, setUser] = useState<User | null>(null);
   const [csrf, setCsrf] = useState("");
@@ -104,11 +125,17 @@ function Shell({ auth, loading, children }: { auth: any; loading: boolean; child
       </aside>
       <main>
         <header className="topbar">
-          <div>
-            <strong>{loading ? "Loading..." : auth.user ? auth.user.name : "Welcome"}</strong>
-            <span>{auth.user ? `${auth.user.role} workspace` : "Independent institution demo"}</span>
+          <div className="topbar-user">
+            <div className="avatar">{auth.user ? initials(auth.user.name) : "CB"}</div>
+            <div>
+              <strong>{loading ? "Loading workspace" : auth.user ? auth.user.name : "Welcome to CareerBridge"}</strong>
+              <span>{auth.user ? `${titleCase(auth.user.role)} workspace` : "Independent institution demo"}</span>
+            </div>
           </div>
-          {auth.user ? <Link className="button secondary" to="/settings">Settings</Link> : <Link className="button" to="/login">Log in</Link>}
+          <div className="topbar-actions">
+            <Link className="button secondary" to="/jobs">Browse jobs</Link>
+            {auth.user ? <Link className="button" to="/settings">Settings</Link> : <Link className="button" to="/login">Log in</Link>}
+          </div>
         </header>
         {children}
       </main>
@@ -128,6 +155,11 @@ function Landing({ auth }: { auth: any }) {
             <Link className="button" to="/jobs">Find opportunities <ChevronRight size={17} /></Link>
             <Link className="button secondary" to="/employer/dashboard">Employer workspace</Link>
           </div>
+          <div className="hero-points">
+            <div><CheckCircle2 size={16} /> Consent-first PASSID verification</div>
+            <div><CheckCircle2 size={16} /> Role-based workspaces for candidates and employers</div>
+            <div><CheckCircle2 size={16} /> No secret keys exposed in the browser</div>
+          </div>
         </div>
         <div className="trust-panel">
           <h2>PASSID Connect flow</h2>
@@ -141,13 +173,18 @@ function Landing({ auth }: { auth: any }) {
         <Metric icon={<BadgeCheck />} label="Verification" value="PASSID scoped consent" />
         <Metric icon={<LockKeyhole />} label="Security" value="Secret keys server-side" />
       </div>
+      <div className="feature-grid">
+        <FeatureCard title="Candidate control" text="Apply once, then approve the exact verification scopes requested for each role." />
+        <FeatureCard title="Employer clarity" text="Every role lists what it needs up front, so applicants know what will be verified." />
+        <FeatureCard title="Institution ready" text="Universities and administrators can support verified workflows without seeing secrets." />
+      </div>
       {!auth.user && <DemoLogins />}
     </section>
   );
 }
 
 function DemoLogins() {
-  return <div className="notice">Demo users: `amara@careerbridge.test`, `recruiter@careerbridge.test`, `admin@careerbridge.test` with password `CareerBridgeDemo!2026`.</div>;
+  return <div className="notice">Demo users: amara@careerbridge.test, recruiter@careerbridge.test, admin@careerbridge.test with password CareerBridgeDemo!2026.</div>;
 }
 
 function Metric({ icon, label, value }: { icon: React.ReactNode; label: string; value: string }) {
@@ -214,26 +251,61 @@ function CandidateDashboard({ auth }: { auth: any }) {
 
 function Profile({ auth }: { auth: any }) {
   const [profile, setProfile] = useState<any>(null);
-  useEffect(() => { api("/api/profile").then((r) => r.json()).then(setProfile); }, []);
+  const [error, setError] = useState("");
+  useEffect(() => {
+    api("/api/profile")
+      .then((r) => r.json())
+      .then((body) => {
+        if (body.error) {
+          setError(body.error);
+          return;
+        }
+        setProfile(body);
+      })
+      .catch(() => setError("Unable to load profile data."));
+  }, []);
   return <section className="page"><PageTitle title="Profile" subtitle="Candidate profile data CareerBridge submits with applications." />
-    <div className="data-panel">{profile ? ["headline", "education", "experience", "skills"].map((key) => <label key={key}>{key}<textarea defaultValue={profile.profile?.[key] ?? ""} /></label>) : "Loading..."}</div>
+    <div className="data-panel">{error ? <div className="error">{error}</div> : profile ? ["headline", "education", "experience", "skills"].map((key) => <label key={key}>{titleCase(key)}<textarea defaultValue={profile.profile?.[key] ?? ""} /></label>) : <LoadingBlock text="Loading profile data" />}</div>
   </section>;
 }
 
 function Jobs({ auth }: { auth: any }) {
   const [jobs, setJobs] = useState<Job[]>([]);
   const [q, setQ] = useState("");
-  useEffect(() => { api(`/api/jobs?q=${encodeURIComponent(q)}`).then((r) => r.json()).then((b) => setJobs(b.jobs ?? [])); }, [q]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  useEffect(() => {
+    setLoading(true);
+    setError("");
+    api(`/api/jobs?q=${encodeURIComponent(q)}`)
+      .then((r) => r.json())
+      .then((b) => {
+        if (b.error) {
+          setError(b.error);
+          setJobs([]);
+          return;
+        }
+        setJobs(safeList(b.jobs));
+      })
+      .catch(() => setError("Unable to load jobs right now."))
+      .finally(() => setLoading(false));
+  }, [q]);
   return <section className="page"><PageTitle title="Opportunity search" subtitle="Search jobs and internships with transparent PASSID requirements." />
     <div className="searchbar"><Search size={18} /><input value={q} onChange={(e) => setQ(e.target.value)} placeholder="Search title, skill, company, location" /></div>
-    <div className="job-list">{jobs.map((job) => <JobCard job={job} key={job.id} />)}</div>
+    {error && <div className="error">{error}</div>}
+    <div className="job-list">{loading ? <LoadingBlock text="Loading opportunities" /> : jobs.length ? jobs.map((job) => <JobCard job={job} key={job.id} />) : <EmptyState title="No jobs found" text="Try a broader search or check back after employers publish new roles." action={<Link className="button secondary" to="/employer/jobs/new">Create a role</Link>} />}</div>
   </section>;
 }
 
 function JobCard({ job }: { job: Job }) {
   return <Link className="job-card" to={`/jobs/${job.id}`}>
-    <div><span className="pill">{job.employment_type}</span><h2>{job.title}</h2><p>{job.organization_name} · {job.location} · {job.work_mode}</p></div>
-    <div className="checks">{job.verification_requirements.map((r) => <span key={r}><ShieldCheck size={14} />{requirementLabels[r] ?? r}</span>)}</div>
+    <div>
+      <span className="pill">{job.employment_type}</span>
+      <h2>{job.title}</h2>
+      <p>{job.organization_name} · {job.location} · {job.work_mode}</p>
+      <div className="pill-row"><span className="sub-pill">{job.compensation}</span></div>
+    </div>
+    <div className="checks">{safeList(job.verification_requirements).map((r) => <span key={r}><ShieldCheck size={14} />{requirementLabels[r] ?? r}</span>)}</div>
   </Link>;
 }
 
@@ -248,14 +320,15 @@ function JobDetail({ auth }: { auth: any }) {
     setMessage(res.ok ? `Application ${body.id} submitted. PASSID verification may be required.` : body.error);
   }
   if (!job) return <Placeholder title="Loading job" text="Preparing the opportunity detail." />;
-  return <section className="page detail-layout"><div><PageTitle title={job.title} subtitle={`${job.organization_name} · ${job.location}`} /><p className="body-copy">{job.description}</p><h3>Qualifications</h3><p className="body-copy">{job.skills}</p><button className="button" onClick={apply}>Apply for this role</button>{message && <div className="notice">{message}</div>}</div><aside className="side-panel"><h3>PASSID requirements</h3>{job.verification_requirements.map((r) => <div className="check-row" key={r}><CheckCircle2 size={17} />{requirementLabels[r] ?? r}</div>)}</aside></section>;
+  return <section className="page detail-layout"><div><PageTitle title={job.title} subtitle={`${job.organization_name} · ${job.location}`} /><p className="body-copy">{job.description}</p><h3>Qualifications</h3><p className="body-copy">{job.skills}</p><div className="detail-actions"><button className="button" onClick={apply}>Apply for this role</button><Link className="button secondary" to="/jobs">Back to jobs</Link></div>{message && <div className="notice">{message}</div>}</div><aside className="side-panel"><h3>PASSID requirements</h3>{safeList(job.verification_requirements).length ? safeList(job.verification_requirements).map((r) => <div className="check-row" key={r}><CheckCircle2 size={17} />{requirementLabels[r] ?? r}</div>) : <div className="notice">No additional verification requirements are listed for this role.</div>}</aside></section>;
 }
 
 function Applications({ auth, employer = false }: { auth: any; employer?: boolean }) {
   const [apps, setApps] = useState<Application[]>([]);
-  useEffect(() => { api("/api/applications").then((r) => r.json()).then((b) => setApps(b.applications ?? [])); }, []);
+  const [loading, setLoading] = useState(true);
+  useEffect(() => { api("/api/applications").then((r) => r.json()).then((b) => setApps(safeList(b.applications))).finally(() => setLoading(false)); }, []);
   return <section className="page"><PageTitle title={employer ? "Applicant list" : "Applications"} subtitle="Status, verification state, and next actions." />
-    <div className="table">{apps.map((app) => <Link key={app.id} className="table-row" to={employer ? `/employer/applicants/${app.id}` : "/verification"}><span>{app.title}</span><span>{app.organization_name ?? app.candidate_name}</span><strong>{app.status}</strong></Link>)}</div>
+    <div className="table">{loading ? <LoadingBlock text="Loading applications" /> : apps.length ? apps.map((app) => <Link key={app.id} className="table-row" to={employer ? `/employer/applicants/${app.id}` : "/verification"}><span>{app.title}</span><span>{app.organization_name ?? app.candidate_name}</span><strong>{app.status}</strong></Link>) : <EmptyState title="No applications yet" text="Apply to a role to see your application and verification status here." action={<Link className="button secondary" to="/jobs">Browse jobs</Link>} />}</div>
   </section>;
 }
 
@@ -263,7 +336,7 @@ function Verification({ auth }: { auth: any }) {
   const [apps, setApps] = useState<Application[]>([]);
   const [message, setMessage] = useState("");
   const [params] = useSearchParams();
-  useEffect(() => { api("/api/applications").then((r) => r.json()).then((b) => setApps(b.applications ?? [])); }, []);
+  useEffect(() => { api("/api/applications").then((r) => r.json()).then((b) => setApps(safeList(b.applications))); }, []);
   async function verify(application_id: string) {
     const res = await api("/api/passid/connect/sessions", { method: "POST", body: JSON.stringify({ application_id }) }, auth.csrf);
     const body = await res.json();
@@ -273,7 +346,7 @@ function Verification({ auth }: { auth: any }) {
   return <section className="page"><PageTitle title="PASSID verification" subtitle="Review consent categories, open hosted PASSID Connect, and track access." />
     {params.get("result") && <div className="notice">PASSID callback result: {params.get("result")}</div>}
     {message && <div className="error">{message}</div>}
-    <div className="grid-2">{apps.map((app) => <div className="data-panel" key={app.id}><h2>{app.title}</h2><p>Status: {app.status}</p><p>CareerBridge requests only approved PASSID scopes for this application.</p><button className="button" onClick={() => verify(app.id)}>Continue with PASSID</button></div>)}</div>
+    <div className="grid-2">{apps.length ? apps.map((app) => <div className="data-panel" key={app.id}><h2>{app.title}</h2><p>Status: {app.status}</p><p>CareerBridge requests only approved PASSID scopes for this application.</p><button className="button" onClick={() => verify(app.id)}>Continue with PASSID</button></div>) : <EmptyState title="No applications to verify" text="Apply to a role first, then return here to approve PASSID consent for that application." action={<Link className="button secondary" to="/jobs">Browse jobs</Link>} />}</div>
   </section>;
 }
 
@@ -289,9 +362,10 @@ function EmployerDashboard({ auth }: { auth: any }) {
 
 function EmployerJobs({ auth }: { auth: any }) {
   const [jobs, setJobs] = useState<Job[]>([]);
-  useEffect(() => { api("/api/employer/jobs").then((r) => r.json()).then((b) => setJobs(b.jobs ?? [])); }, []);
+  const [loading, setLoading] = useState(true);
+  useEffect(() => { api("/api/employer/jobs").then((r) => r.json()).then((b) => setJobs(safeList(b.jobs))).finally(() => setLoading(false)); }, []);
   return <section className="page"><PageTitle title="Employer jobs" subtitle="Create and manage opportunities." /><Link className="button" to="/employer/jobs/new">Create job</Link>
-    <div className="job-list">{jobs.map((job) => <JobCard job={job} key={job.id} />)}</div>
+    <div className="job-list">{loading ? <LoadingBlock text="Loading employer jobs" /> : jobs.length ? jobs.map((job) => <JobCard job={job} key={job.id} />) : <EmptyState title="No jobs published" text="Create your first role to start collecting qualified applicants." action={<Link className="button secondary" to="/employer/jobs/new">Create job</Link>} />}</div>
   </section>;
 }
 
@@ -332,7 +406,7 @@ function ApplicantDetail({ auth }: { auth: any }) {
   const verification = detail?.passid_verification ?? {};
   return <section className="page"><PageTitle title="Applicant detail" subtitle="Verification results are status-oriented and scoped." />
     <div className="detail-layout"><div className="data-panel"><h2>{detail?.applicant?.candidate_name ?? "Applicant"}</h2><p>{detail?.applicant?.title}</p><p>Stage: {detail?.applicant?.status}</p></div>
-      <aside className="side-panel"><h3>PASSID verification</h3>{["identity", "education", "account_ownership", "marketplace_uniqueness", "consent_status"].map((k) => <div className="check-row" key={k}><BadgeCheck size={17} />{k.replace(/_/g, " ")}: {verification[k] ?? "Not requested"}</div>)}</aside></div>
+      <aside className="side-panel"><h3>PASSID verification</h3>{["identity", "education", "account_ownership", "marketplace_uniqueness", "consent_status"].map((k) => <div className="check-row" key={k}><BadgeCheck size={17} />{titleCase(k)}: {verification[k] ?? "Not requested"}</div>)}</aside></div>
   </section>;
 }
 
@@ -361,6 +435,18 @@ function PageTitle({ title, subtitle }: { title: string; subtitle: string }) {
 
 function ActionCard({ icon, title, text, link }: { icon: React.ReactNode; title: string; text: string; link: string }) {
   return <Link className="action-card" to={link}>{icon}<h2>{title}</h2><p>{text}</p><span>Open <ChevronRight size={15} /></span></Link>;
+}
+
+function FeatureCard({ title, text }: { title: string; text: string }) {
+  return <div className="feature-card"><h3>{title}</h3><p>{text}</p></div>;
+}
+
+function LoadingBlock({ text }: { text: string }) {
+  return <div className="loading-block" aria-live="polite"><span className="spinner" />{text}</div>;
+}
+
+function EmptyState({ title, text, action }: { title: string; text: string; action?: React.ReactNode }) {
+  return <div className="empty-state"><h3>{title}</h3><p>{text}</p>{action}</div>;
 }
 
 function Placeholder({ title, text }: { title: string; text: string }) {
