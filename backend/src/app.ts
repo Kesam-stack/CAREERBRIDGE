@@ -3,6 +3,7 @@ import { cors } from "hono/cors";
 import { getCookie, setCookie, deleteCookie } from "hono/cookie";
 import { z } from "zod";
 import type { Database } from "bun:sqlite";
+import { createHash } from "crypto";
 import { join, normalize, extname } from "path";
 import { openCareerBridgeDb, type Role } from "./db";
 import { getEnvironmentIssues, loadEnv, safeVersion, type CareerBridgeEnv } from "./env";
@@ -470,20 +471,31 @@ export function createCareerBridgeApp(options: AppOptions = {}) {
     return c.json({ ok: true, status: "revoked" });
   });
 
-  app.post("/api/webhooks/passid", async (c) => {
-    const raw = await c.req.text();
+  async function verifyPassidWebhook(c: any) {
+    const raw = Buffer.from(await c.req.arrayBuffer());
     const sig = c.req.header("x-passid-signature") ?? c.req.header("PassID-Signature") ?? "";
-    const timestamp = c.req.header("x-passid-timestamp") ?? c.req.header("PassID-Timestamp") ?? "";
+    const received = sig.replace(/^sha256=/, "");
+
+    if (!/^sha256=[0-9a-f]{64}$/.test(sig)) return { ok: false as const, response: c.json({ error: "invalid_signature" }, 401) };
+
+    const expected = hmac(raw, env.PASSID_WEBHOOK_SECRET);
+    if (!safeEqual(received, expected)) return { ok: false as const, response: c.json({ error: "invalid_signature" }, 401) };
+
+    return { ok: true as const, body: raw.toString("utf8"), bodySha256: createHash("sha256").update(raw).digest("hex") };
+  }
+
+  app.post("/api/institution/webhook-catcher", async (c) => {
+    const verified = await verifyPassidWebhook(c);
+    if (!verified.ok) return verified.response;
+    return c.json({ ok: true, body_sha256: verified.bodySha256 });
+  });
+
+  app.post("/api/webhooks/passid", async (c) => {
+    const verified = await verifyPassidWebhook(c);
+    if (!verified.ok) return verified.response;
     const eventIdHeader = c.req.header("x-passid-event") ?? c.req.header("PassID-Event") ?? "";
 
-    const ts = /^\d+$/.test(timestamp) ? Number(timestamp) : Date.parse(timestamp);
-    if (!ts || Math.abs(now() - ts) > 1000 * 60 * 5) return c.json({ error: "invalid_timestamp" }, 401);
-
-    const expected = hmac(`${timestamp}.${raw}`, env.PASSID_WEBHOOK_SECRET);
-    const received = sig.replace(/^sha256=/, "");
-    if (!sig || !safeEqual(received, expected)) return c.json({ error: "invalid_signature" }, 401);
-    
-    const event = JSON.parse(raw);
+    const event = JSON.parse(verified.body);
     const eventId = String(event.id ?? eventIdHeader ?? randomId("evt"));
     const existing = db.prepare("SELECT id FROM passid_webhook_events WHERE id=?").get(eventId);
     if (existing) return c.json({ ok: true, duplicate: true });

@@ -18,7 +18,7 @@ export function verifyPassword(password: string, stored: string): boolean {
   return actual.length === expectedBuf.length && timingSafeEqual(actual, expectedBuf);
 }
 
-export function hmac(value: string, secret: string): string {
+export function hmac(value: string | Buffer, secret: string): string {
   return createHmac("sha256", secret).update(value).digest("hex");
 }
 

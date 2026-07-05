@@ -313,11 +313,17 @@ describe("CareerBridge independent PASSID institution app", () => {
     db.prepare("INSERT INTO passid_connections (id,application_id,candidate_user_id,passid_session_id,connection_id,status,granted_scopes,consent_status,created_at,updated_at) VALUES ('cbconn_1','app_webhook','candidate_demo','pcs_1','conn_sandbox_test_123','approved','[\"identity.read\"]','active',?,?)").run(Date.now(), Date.now());
     db.prepare("INSERT INTO verification_results (id,application_id,candidate_user_id,result_json,updated_at) VALUES ('vr_webhook','app_webhook','candidate_demo',?,?)").run(JSON.stringify({ identity: "verified", consent_status: "active" }), Date.now());
     const payload = JSON.stringify({ id: "evt_1", type: "connection.revoked", data: { connection_id: "conn_sandbox_test_123", status: "revoked" } });
-    const ts = String(Date.now());
-    const sig = hmac(`${ts}.${payload}`, baseEnv.PASSID_WEBHOOK_SECRET);
+    const sig = hmac(payload, baseEnv.PASSID_WEBHOOK_SECRET);
+    const catcher = await app.request("/api/institution/webhook-catcher", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-PASSID-Signature": `sha256=${sig}` },
+      body: payload,
+    });
+    expect(catcher.status).toBe(200);
+    expect((await catcher.json() as any).ok).toBe(true);
     const res = await app.request("/api/webhooks/passid", {
       method: "POST",
-      headers: { "Content-Type": "application/json", "PassID-Timestamp": ts, "PassID-Signature": `sha256=${sig}` },
+      headers: { "Content-Type": "application/json", "X-PASSID-Signature": `sha256=${sig}` },
       body: payload,
     });
     expect(res.status).toBe(200);
@@ -325,7 +331,7 @@ describe("CareerBridge independent PASSID institution app", () => {
     expect(conn.consent_status).toBe("revoked");
     const replay = await app.request("/api/webhooks/passid", {
       method: "POST",
-      headers: { "Content-Type": "application/json", "PassID-Timestamp": ts, "PassID-Signature": `sha256=${sig}` },
+      headers: { "Content-Type": "application/json", "X-PASSID-Signature": `sha256=${sig}` },
       body: payload,
     });
     expect((await replay.json() as any).duplicate).toBe(true);
