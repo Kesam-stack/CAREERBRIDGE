@@ -3,7 +3,7 @@ import { cors } from "hono/cors";
 import { getCookie, setCookie, deleteCookie } from "hono/cookie";
 import { z } from "zod";
 import type { Database } from "bun:sqlite";
-import { createHash } from "crypto";
+import { createHash, randomInt } from "crypto";
 import { join, normalize, extname } from "path";
 import { openCareerBridgeDb, type Role } from "./db";
 import { getEnvironmentIssues, loadEnv, safeVersion, type CareerBridgeEnv } from "./env";
@@ -15,7 +15,6 @@ const APPROVED_SCOPES = [
   "verification_status.read",
   "accounts.read",
   "income.read",
-  "risk_flags.read",
 ];
 
 const REQUIREMENT_TO_SCOPE: Record<string, string> = {
@@ -23,7 +22,6 @@ const REQUIREMENT_TO_SCOPE: Record<string, string> = {
   income_verification: "income.read",
   work_authorization: "verification_status.read",
   account_ownership: "accounts.read",
-  risk_assessment: "risk_flags.read",
 };
 
 export interface AppOptions {
@@ -97,11 +95,28 @@ export function createCareerBridgeApp(options: AppOptions = {}) {
   const passid = options.passidClient ?? createPassidClient(env);
   const app = new Hono();
 
+  function createUserSession(c: any, user: User) {
+    const sessionId = randomId("sess");
+    const csrf = randomId("csrf");
+    db.prepare("INSERT INTO sessions (id,user_id,csrf,expires_at,created_at) VALUES (?,?,?,?,?)").run(sessionId, user.id, csrf, now() + 1000 * 60 * 60 * 8, now());
+    setCookie(c, "cb_session", sessionId, { httpOnly: true, secure: env.NODE_ENV === "production", sameSite: "Lax", path: "/", maxAge: 60 * 60 * 8 });
+    return { csrf };
+  }
+
+  function createOtpChallenge(user: User) {
+    const code = String(randomInt(0, 1_000_000)).padStart(6, "0");
+    const challengeId = randomId("otp");
+    db.prepare("INSERT INTO auth_otps (id,user_id,code_hash,expires_at,created_at) VALUES (?,?,?,?,?)")
+      .run(challengeId, user.id, hmac(code, env.SESSION_SECRET), now() + 1000 * 60 * 10, now());
+    audit(db, user.id, "auth.otp.send", "user", user.id, { channel: "email" });
+    return { challengeId, code };
+  }
+
   app.use("*", async (c, next) => {
     c.header("X-Content-Type-Options", "nosniff");
     c.header("X-Frame-Options", "DENY");
     c.header("Referrer-Policy", "strict-origin-when-cross-origin");
-    c.header("Permissions-Policy", "camera=(), microphone=(), geolocation=()");
+    c.header("Permissions-Policy", "camera=(self), microphone=(), geolocation=()");
     await next();
   });
 
@@ -164,10 +179,7 @@ export function createCareerBridgeApp(options: AppOptions = {}) {
         db.prepare("INSERT INTO organizations (id,owner_user_id,name,type,status,created_at) VALUES (?,?,?,?,?,?)")
           .run(randomId("org"), id, `${body.name}'s organization`, body.role === "university" ? "university" : "employer", "pending", now());
       }
-      const sessionId = randomId("sess");
-      const csrf = randomId("csrf");
-      db.prepare("INSERT INTO sessions (id,user_id,csrf,expires_at,created_at) VALUES (?,?,?,?,?)").run(sessionId, id, csrf, now() + 1000 * 60 * 60 * 8, now());
-      setCookie(c, "cb_session", sessionId, { httpOnly: true, secure: env.NODE_ENV === "production", sameSite: "Lax", path: "/", maxAge: 60 * 60 * 8 });
+      const { csrf } = createUserSession(c, { id, email: body.email.toLowerCase(), role: body.role, name: body.name });
       audit(db, id, "user.signup", "user", id, { role: body.role });
       return c.json({ user: { id, email: body.email.toLowerCase(), role: body.role, name: body.name }, csrf }, 201);
     } catch {
@@ -182,11 +194,31 @@ export function createCareerBridgeApp(options: AppOptions = {}) {
     if (!user || user.suspended_at || (!demoOk && !verifyPassword(body.password, user.password_hash))) {
       return c.json({ error: "invalid_credentials" }, 401);
     }
-    const sessionId = randomId("sess");
-    const csrf = randomId("csrf");
-    db.prepare("INSERT INTO sessions (id,user_id,csrf,expires_at,created_at) VALUES (?,?,?,?,?)").run(sessionId, user.id, csrf, now() + 1000 * 60 * 60 * 8, now());
-    setCookie(c, "cb_session", sessionId, { httpOnly: true, secure: env.NODE_ENV === "production", sameSite: "Lax", path: "/", maxAge: 60 * 60 * 8 });
-    audit(db, user.id, "auth.login", "user", user.id, {});
+    const challenge = createOtpChallenge(user);
+    return c.json({
+      otp_required: true,
+      challenge_id: challenge.challengeId,
+      delivery: "email",
+      ...(env.NODE_ENV !== "production" ? { dev_otp: challenge.code } : {}),
+    });
+  });
+
+  app.post("/api/auth/login/verify", async (c) => {
+    const body = z.object({ challenge_id: z.string().min(1), otp: z.string().regex(/^\d{6}$/) }).parse(await c.req.json());
+    const challenge = db.prepare(`
+      SELECT o.*, u.id AS user_id, u.email, u.role, u.name, u.suspended_at
+      FROM auth_otps o JOIN users u ON u.id=o.user_id
+      WHERE o.id=?
+    `).get(body.challenge_id) as any;
+    if (!challenge || challenge.used_at || challenge.expires_at < now() || challenge.suspended_at) {
+      return c.json({ error: "invalid_otp" }, 401);
+    }
+    const actual = hmac(body.otp, env.SESSION_SECRET);
+    if (!safeEqual(actual, challenge.code_hash)) return c.json({ error: "invalid_otp" }, 401);
+    db.prepare("UPDATE auth_otps SET used_at=? WHERE id=?").run(now(), body.challenge_id);
+    const user = { id: challenge.user_id, email: challenge.email, role: challenge.role, name: challenge.name } as User;
+    const { csrf } = createUserSession(c, user);
+    audit(db, user.id, "auth.login", "user", user.id, { otp: true });
     return c.json({ user: publicUser(user), csrf });
   });
 

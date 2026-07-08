@@ -88,10 +88,20 @@ async function login(app: any, email: string, role = "candidate") {
     body: JSON.stringify({ email, password }),
   });
   expect(res.status).toBe(200);
-  const body = await res.json() as any;
+  const challenge = await res.json() as any;
+  expect(challenge.otp_required).toBe(true);
+  expect(challenge.challenge_id).toBeTruthy();
+  expect(challenge.dev_otp).toMatch(/^\d{6}$/);
+  const verify = await app.request("/api/auth/login/verify", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ challenge_id: challenge.challenge_id, otp: challenge.dev_otp }),
+  });
+  expect(verify.status).toBe(200);
+  const body = await verify.json() as any;
   expect(body.user.role).toBe(role);
   return {
-    cookie: res.headers.get("set-cookie")!.split(";")[0],
+    cookie: verify.headers.get("set-cookie")!.split(";")[0],
     csrf: body.csrf as string,
     user: body.user,
   };
@@ -161,6 +171,34 @@ describe("CareerBridge independent PASSID institution app", () => {
 
     const afterLogout = await app.request("/api/auth/me", { headers: { Cookie: cookie } });
     expect(await afterLogout.json()).toEqual({ user: null });
+  });
+
+  it("sends an OTP before login session creation and rejects wrong codes", async () => {
+    const first = await app.request("/api/auth/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: "amara@careerbridge.test", password: "CareerBridgeDemo!2026" }),
+    });
+    expect(first.status).toBe(200);
+    expect(first.headers.get("set-cookie")).toBeNull();
+    const challenge = await first.json() as any;
+    expect(challenge.otp_required).toBe(true);
+
+    const wrongOtp = challenge.dev_otp === "000000" ? "000001" : "000000";
+    const wrong = await app.request("/api/auth/login/verify", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ challenge_id: challenge.challenge_id, otp: wrongOtp }),
+    });
+    expect(wrong.status).toBe(401);
+
+    const ok = await app.request("/api/auth/login/verify", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ challenge_id: challenge.challenge_id, otp: challenge.dev_otp }),
+    });
+    expect(ok.status).toBe(200);
+    expect(ok.headers.get("set-cookie")).toContain("cb_session=");
   });
 
   it("allows candidates to apply and creates a server-side PASSID session without leaking secrets", async () => {
@@ -397,7 +435,7 @@ describe("CareerBridge independent PASSID institution app", () => {
         compensation: "$70,000",
         description: "Run trust and operations work for a fast-growing marketplace with clear verification controls.",
         skills: "operations, SQL, communication",
-        verification_requirements: ["identity_verified", "account_ownership"],
+        verification_requirements: ["identity_verified", "account_ownership", "income_verification", "risk_assessment"],
         status: "published",
       }),
     });
@@ -408,6 +446,8 @@ describe("CareerBridge independent PASSID institution app", () => {
     expect(employerJobs.status).toBe(200);
     const owned = await employerJobs.json() as any;
     expect(owned.jobs.some((job: any) => job.id === created.id && job.status === "published")).toBe(true);
+    const stored = owned.jobs.find((job: any) => job.id === created.id);
+    expect(stored.verification_requirements).toEqual(["identity_verified", "account_ownership", "income_verification"]);
 
     const publicJobs = await app.request("/api/jobs");
     const publicBody = await publicJobs.json() as any;

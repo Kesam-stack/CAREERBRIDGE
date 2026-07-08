@@ -33,6 +33,7 @@ export function migrate(db: Database): void {
     )
   `);
   db.run(`CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id), csrf TEXT NOT NULL, expires_at INTEGER NOT NULL, created_at INTEGER NOT NULL)`);
+  db.run(`CREATE TABLE IF NOT EXISTS auth_otps (id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id), code_hash TEXT NOT NULL, expires_at INTEGER NOT NULL, used_at INTEGER, created_at INTEGER NOT NULL)`);
   db.run(`CREATE TABLE IF NOT EXISTS candidate_profiles (user_id TEXT PRIMARY KEY REFERENCES users(id), headline TEXT, education TEXT, experience TEXT, skills TEXT, passid_status TEXT NOT NULL DEFAULT 'not_connected')`);
   db.run(`CREATE TABLE IF NOT EXISTS organizations (id TEXT PRIMARY KEY, owner_user_id TEXT NOT NULL REFERENCES users(id), name TEXT NOT NULL, type TEXT NOT NULL DEFAULT 'employer', status TEXT NOT NULL DEFAULT 'pending', website TEXT, created_at INTEGER NOT NULL)`);
   db.run(`CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, organization_id TEXT NOT NULL REFERENCES organizations(id), title TEXT NOT NULL, location TEXT NOT NULL, work_mode TEXT NOT NULL, employment_type TEXT NOT NULL, compensation TEXT, description TEXT NOT NULL, qualifications TEXT, skills TEXT, deadline TEXT, verification_requirements TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'draft', created_at INTEGER NOT NULL)`);

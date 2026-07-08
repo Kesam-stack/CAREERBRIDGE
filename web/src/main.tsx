@@ -1,7 +1,7 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { BrowserRouter, Link, NavLink, Route, Routes, useNavigate, useParams, useSearchParams } from "react-router-dom";
-import { BadgeCheck, BriefcaseBusiness, Building2, CalendarClock, CheckCircle2, ChevronRight, ClipboardList, KeyRound, Layers3, LockKeyhole, Search, ShieldCheck, Sparkles, UserRoundCheck, UsersRound, Webhook, XCircle } from "lucide-react";
+import { BadgeCheck, BriefcaseBusiness, Building2, CalendarClock, CheckCircle2, ChevronRight, ClipboardList, Copy, ExternalLink, KeyRound, Layers3, LockKeyhole, QrCode, ScanLine, Search, ShieldCheck, Smartphone, Sparkles, UserRoundCheck, UsersRound, Webhook, XCircle } from "lucide-react";
 import "./styles.css";
 
 type User = { id: string; email: string; role: "candidate" | "employer" | "university" | "admin"; name: string };
@@ -14,13 +14,18 @@ const requirementLabels: Record<string, string> = {
   employment_credential: "Employment credential",
   work_authorization: "Work authorization",
   account_ownership: "Account ownership",
-  payout_readiness: "Payout readiness",
   income_verification: "Income verification",
-  business_verification: "Business verification",
   marketplace_uniqueness: "Marketplace uniqueness",
-  duplicate_account_risk: "Duplicate-account risk",
   custom_passid_credential: "Custom PASSID credential"
 };
+const employerRequirementKeys = ["identity_verified", "work_authorization", "account_ownership", "income_verification"];
+const privacyDataPermissions = [
+  ["Identity", "Shared only after candidate consent"],
+  ["Education credential", "Status-only verification"],
+  ["Work authorization", "Eligibility status only"],
+  ["Account ownership", "Ownership status only"],
+  ["Income verification", "Status-only verification"],
+];
 
 function api(path: string, options: RequestInit = {}, csrf?: string) {
   return fetch(path, {
@@ -171,7 +176,7 @@ function Landing({ auth }: { auth: any }) {
         <div className="hero-copy">
           <span className="eyebrow"><Sparkles size={16} /> Trusted hiring, consented data</span>
           <h1>CareerBridge</h1>
-          <p>A production-style opportunity marketplace where candidates control PASSID-powered identity, credential, and financial-trust verification before employers review applications.</p>
+          <p>A production-style opportunity marketplace where candidates control PASSID-powered identity and credential verification before employers review applications.</p>
           <div className="hero-actions">
             <Link className="button" to="/jobs">Find opportunities <ChevronRight size={17} /></Link>
             <Link className="button secondary" to="/signup">Create account</Link>
@@ -218,20 +223,38 @@ function Login({ auth }: { auth: any }) {
   const navigate = useNavigate();
   const [email, setEmail] = useState("amara@careerbridge.test");
   const [password, setPassword] = useState("CareerBridgeDemo!2026");
+  const [otp, setOtp] = useState("");
+  const [challenge, setChallenge] = useState<{ id: string; devOtp?: string } | null>(null);
   const [error, setError] = useState("");
   async function submit(e: React.FormEvent) {
     e.preventDefault();
     setError("");
+    if (challenge) {
+      const res = await api("/api/auth/login/verify", { method: "POST", body: JSON.stringify({ challenge_id: challenge.id, otp }) });
+      const body = await res.json();
+      if (!res.ok) return setError(body.error ?? "OTP verification failed");
+      auth.setUser(body.user); auth.setCsrf(body.csrf);
+      navigate(body.user.role === "employer" ? "/employer/dashboard" : body.user.role === "admin" ? "/admin/passid" : "/dashboard");
+      return;
+    }
     const res = await api("/api/auth/login", { method: "POST", body: JSON.stringify({ email, password }) });
     const body = await res.json();
     if (!res.ok) return setError(body.error ?? "Login failed");
-    auth.setUser(body.user); auth.setCsrf(body.csrf);
-    navigate(body.user.role === "employer" ? "/employer/dashboard" : body.user.role === "admin" ? "/admin/passid" : "/dashboard");
+    setChallenge({ id: body.challenge_id, devOtp: body.dev_otp });
+    setOtp(body.dev_otp ?? "");
   }
-  return <AuthCard title="Log in" onSubmit={submit} error={error}>
-    <input value={email} onChange={(e) => setEmail(e.target.value)} placeholder="Email" />
-    <input value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Password" type="password" />
-    <button className="button" type="submit">Log in securely</button>
+  return <AuthCard title={challenge ? "Enter OTP" : "Log in"} onSubmit={submit} error={error}>
+    {!challenge ? <>
+      <input value={email} onChange={(e) => setEmail(e.target.value)} placeholder="Email" />
+      <input value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Password" type="password" />
+      <button className="button" type="submit">Send OTP</button>
+    </> : <>
+      <div className="notice">We sent a one-time code for this login.</div>
+      <input value={otp} onChange={(e) => setOtp(e.target.value.replace(/\D/g, "").slice(0, 6))} placeholder="6-digit OTP" inputMode="numeric" />
+      <button className="button" type="submit">Verify and log in</button>
+      <button className="button secondary" type="button" onClick={() => { setChallenge(null); setOtp(""); }}>Use different credentials</button>
+      {challenge.devOtp && <div className="notice">Demo OTP: {challenge.devOtp}</div>}
+    </>}
     <p className="auth-link-row">No account yet? <Link to="/signup">Create one now</Link></p>
     <DemoLogins />
   </AuthCard>;
@@ -291,7 +314,10 @@ function Profile({ auth }: { auth: any }) {
       .catch(() => setError("Unable to load profile data."));
   }, []);
   return <section className="page"><PageTitle title="Profile" subtitle="Candidate profile data CareerBridge submits with applications." />
-    <div className="data-panel">{error ? <div className="error">{error}</div> : profile ? ["headline", "education", "experience", "skills"].map((key) => <label key={key}>{titleCase(key)}<textarea defaultValue={profile.profile?.[key] ?? ""} /></label>) : <LoadingBlock text="Loading profile data" />}</div>
+    <div className="grid-2">
+      <div className="data-panel">{error ? <div className="error">{error}</div> : profile ? ["headline", "education", "experience", "skills"].map((key) => <label key={key}>{titleCase(key)}<textarea defaultValue={profile.profile?.[key] ?? ""} /></label>) : <LoadingBlock text="Loading profile data" />}</div>
+      <aside className="side-panel"><h3>Data privacy</h3>{privacyDataPermissions.map(([name, detail]) => <div className="check-row" key={name}><ShieldCheck size={17} />{name}: {detail}</div>)}</aside>
+    </div>
   </section>;
 }
 
@@ -361,18 +387,117 @@ function Applications({ auth, employer = false }: { auth: any; employer?: boolea
 function Verification({ auth }: { auth: any }) {
   const [apps, setApps] = useState<Application[]>([]);
   const [message, setMessage] = useState("");
+  const [walletSession, setWalletSession] = useState<{ applicationTitle: string; hostedUrl: string; expiresAt?: string; requestedScopes: string[] } | null>(null);
+  const [qrValue, setQrValue] = useState("");
+  const [scannerStatus, setScannerStatus] = useState("");
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+  const scanTimerRef = useRef<number | null>(null);
   const [params] = useSearchParams();
   useEffect(() => { api("/api/applications").then((r) => r.json()).then((b) => setApps(safeList(b.applications))); }, []);
-  async function verify(application_id: string) {
-    const res = await api("/api/passid/connect/sessions", { method: "POST", body: JSON.stringify({ application_id }) }, auth.csrf);
+  function stopScanner() {
+    if (scanTimerRef.current) window.clearInterval(scanTimerRef.current);
+    scanTimerRef.current = null;
+    streamRef.current?.getTracks().forEach((track) => track.stop());
+    streamRef.current = null;
+    if (videoRef.current) videoRef.current.srcObject = null;
+  }
+  useEffect(() => stopScanner, []);
+  function openInstitutionRequest(value = qrValue) {
+    const next = value.trim();
+    if (!next) return setMessage("Scan or paste the institution QR request first.");
+    if (/^https?:\/\//i.test(next) || next.startsWith("/")) {
+      window.location.assign(next);
+      return;
+    }
+    setMessage(`Institution request code captured: ${next}`);
+  }
+  async function startScanner() {
+    setScannerStatus("");
+    const Detector = (window as any).BarcodeDetector;
+    if (!Detector || !navigator.mediaDevices?.getUserMedia) {
+      setScannerStatus("Camera QR scanning is not available in this browser. Paste the institution QR link or code instead.");
+      return;
+    }
+    try {
+      const detector = new Detector({ formats: ["qr_code"] });
+      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
+      streamRef.current = stream;
+      if (!videoRef.current) return;
+      videoRef.current.srcObject = stream;
+      await videoRef.current.play();
+      scanTimerRef.current = window.setInterval(async () => {
+        if (!videoRef.current) return;
+        const codes = await detector.detect(videoRef.current);
+        const rawValue = codes?.[0]?.rawValue;
+        if (!rawValue) return;
+        setQrValue(rawValue);
+        stopScanner();
+        openInstitutionRequest(rawValue);
+      }, 800);
+    } catch {
+      stopScanner();
+      setScannerStatus("Unable to start camera scanning. Paste the institution QR link or code instead.");
+    }
+  }
+  async function verify(application: Application) {
+    const res = await api("/api/passid/connect/sessions", { method: "POST", body: JSON.stringify({ application_id: application.id }) }, auth.csrf);
     const body = await res.json();
     if (!res.ok) return setMessage(body.error ?? "Unable to create PASSID session");
-    window.location.assign(body.hosted_url);
+    setMessage("");
+    setWalletSession({
+      applicationTitle: application.title,
+      hostedUrl: body.hosted_url,
+      expiresAt: body.expires_at,
+      requestedScopes: safeList(body.requested_scopes),
+    });
+  }
+  async function copyWalletLink() {
+    if (!walletSession) return;
+    await navigator.clipboard?.writeText(walletSession.hostedUrl);
+    setMessage("PASSID wallet link copied.");
+  }
+  async function shareWalletLink() {
+    if (!walletSession) return;
+    if (navigator.share) {
+      await navigator.share({ title: "PASSID verification", url: walletSession.hostedUrl });
+      return;
+    }
+    await copyWalletLink();
   }
   return <section className="page"><PageTitle title="PASSID verification" subtitle="Review consent categories, open hosted PASSID Connect, and track access." />
     {params.get("result") && <div className="notice">PASSID callback result: {params.get("result")}</div>}
-    {message && <div className="error">{message}</div>}
-    <div className="grid-2">{apps.length ? apps.map((app) => <div className="data-panel" key={app.id}><h2>{app.title}</h2><p>Status: {app.status}</p><p>CareerBridge requests only approved PASSID scopes for this application.</p><button className="button" onClick={() => verify(app.id)}>Continue with PASSID</button></div>) : <EmptyState title="No applications to verify" text="Apply to a role first, then return here to approve PASSID consent for that application." action={<Link className="button secondary" to="/jobs">Browse jobs</Link>} />}</div>
+    {message && <div className="notice">{message}</div>}
+    <div className="wallet-panel">
+      <div>
+        <span className="eyebrow"><QrCode size={15} /> Institution QR</span>
+        <h2>Verify from your wallet</h2>
+        <p>Scan the QR shown by an institution, or paste the request link/code to continue from this wallet session.</p>
+        {scannerStatus && <div className="notice">{scannerStatus}</div>}
+        <video ref={videoRef} className="qr-video" muted playsInline />
+      </div>
+      <div className="wallet-actions">
+        <button className="button" type="button" onClick={startScanner}><ScanLine size={18} /> Scan QR</button>
+        <button className="button secondary" type="button" onClick={stopScanner}>Stop camera</button>
+        <input value={qrValue} onChange={(e) => setQrValue(e.target.value)} placeholder="Paste institution QR link or code" />
+        <button className="button secondary" type="button" onClick={() => openInstitutionRequest()}><ExternalLink size={18} /> Continue</button>
+      </div>
+    </div>
+    {walletSession && <div className="wallet-panel">
+      <div>
+        <span className="eyebrow"><Smartphone size={15} /> PASSID Wallet</span>
+        <h2>{walletSession.applicationTitle}</h2>
+        <p>Open the secure PASSID session in your wallet, or share it to your phone without exposing any secret keys.</p>
+        <div className="scope-list">{walletSession.requestedScopes.map((scope) => <span key={scope}>{scope}</span>)}</div>
+      </div>
+      <div className="wallet-actions">
+        <a className="button" href={walletSession.hostedUrl} target="_blank" rel="noreferrer"><ExternalLink size={18} /> Open wallet</a>
+        <button className="button secondary" type="button" onClick={shareWalletLink}><Smartphone size={18} /> Send to phone</button>
+        <button className="button secondary" type="button" onClick={copyWalletLink}><Copy size={18} /> Copy link</button>
+        {walletSession.expiresAt && <small>Expires {new Date(walletSession.expiresAt).toLocaleString()}</small>}
+      </div>
+    </div>}
+    <div className="grid-2">{apps.length ? apps.map((app) => <div className="data-panel" key={app.id}><h2>{app.title}</h2><p>Status: {app.status}</p><p>CareerBridge requests only approved PASSID scopes for this application.</p><button className="button" onClick={() => verify(app)}>Continue with PASSID</button></div>) : <EmptyState title="No applications to verify" text="Apply to a role first, then return here to approve PASSID consent for that application." action={<Link className="button secondary" to="/jobs">Browse jobs</Link>} />}</div>
   </section>;
 }
 
@@ -417,7 +542,7 @@ function NewJob({ auth }: { auth: any }) {
       <input name="deadline" placeholder="Deadline" />
       <textarea name="description" placeholder="Description" required />
       <textarea name="skills" placeholder="Required skills" />
-      <div className="check-grid">{Object.entries(requirementLabels).map(([key, label]) => <label key={key}><input type="checkbox" name="verification_requirements" value={key} defaultChecked={key === "identity_verified"} />{label}</label>)}</div>
+      <div className="check-grid">{employerRequirementKeys.map((key) => <label key={key}><input type="checkbox" name="verification_requirements" value={key} defaultChecked={key === "identity_verified"} />{requirementLabels[key]}</label>)}</div>
       <select name="status"><option>draft</option><option>published</option></select>
       <button className="button" type="submit">Publish job</button>
       {created && <div className="notice">{created}</div>}
