@@ -27,6 +27,7 @@ function mockPassid(): PassidClient {
   return {
     async createSession(input) {
       expect(input.scopes).toContain("identity.read");
+      expect(input.scopes).toContain("income.read");
       expect(input.return_url).toContain("state=");
       return {
         session_id: "pcs_sandbox_test_123",
@@ -88,20 +89,10 @@ async function login(app: any, email: string, role = "candidate") {
     body: JSON.stringify({ email, password }),
   });
   expect(res.status).toBe(200);
-  const challenge = await res.json() as any;
-  expect(challenge.otp_required).toBe(true);
-  expect(challenge.challenge_id).toBeTruthy();
-  expect(challenge.dev_otp).toMatch(/^\d{6}$/);
-  const verify = await app.request("/api/auth/login/verify", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ challenge_id: challenge.challenge_id, otp: challenge.dev_otp }),
-  });
-  expect(verify.status).toBe(200);
-  const body = await verify.json() as any;
+  const body = await res.json() as any;
   expect(body.user.role).toBe(role);
   return {
-    cookie: verify.headers.get("set-cookie")!.split(";")[0],
+    cookie: res.headers.get("set-cookie")!.split(";")[0],
     csrf: body.csrf as string,
     user: body.user,
   };
@@ -173,35 +164,41 @@ describe("CareerBridge independent PASSID institution app", () => {
     expect(await afterLogout.json()).toEqual({ user: null });
   });
 
-  it("sends an OTP before login session creation and rejects wrong codes", async () => {
-    const first = await app.request("/api/auth/login", {
+  it("logs in directly and rejects invalid credentials", async () => {
+    const bad = await app.request("/api/auth/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: "amara@careerbridge.test", password: "wrong-password" }),
+    });
+    expect(bad.status).toBe(401);
+    expect(bad.headers.get("set-cookie")).toBeNull();
+
+    const ok = await app.request("/api/auth/login", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ email: "amara@careerbridge.test", password: "CareerBridgeDemo!2026" }),
     });
-    expect(first.status).toBe(200);
-    expect(first.headers.get("set-cookie")).toBeNull();
-    const challenge = await first.json() as any;
-    expect(challenge.otp_required).toBe(true);
-
-    const wrongOtp = challenge.dev_otp === "000000" ? "000001" : "000000";
-    const wrong = await app.request("/api/auth/login/verify", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ challenge_id: challenge.challenge_id, otp: wrongOtp }),
-    });
-    expect(wrong.status).toBe(401);
-
-    const ok = await app.request("/api/auth/login/verify", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ challenge_id: challenge.challenge_id, otp: challenge.dev_otp }),
-    });
     expect(ok.status).toBe(200);
     expect(ok.headers.get("set-cookie")).toContain("cb_session=");
+    const body = await ok.json() as any;
+    expect(body.user.email).toBe("amara@careerbridge.test");
+    expect(body.csrf).toBeTruthy();
+
+    const legacyVerify = await app.request("/api/auth/login/verify", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ challenge_id: "otp_legacy", otp: "123456" }),
+    });
+    expect(legacyVerify.status).toBe(404);
+    expect(db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='auth_otps'").get()).toBeNull();
   });
 
   it("allows candidates to apply and creates a server-side PASSID session without leaking secrets", async () => {
+    const jobs = await app.request("/api/jobs");
+    const jobsBody = await jobs.json() as any;
+    const demoJob = jobsBody.jobs.find((job: any) => job.id === "job_demo");
+    expect(demoJob.verification_requirements).toContain("income_verification");
+
     const auth = await login(app, "amara@careerbridge.test");
     const application = await applyToDemoJob(app, auth);
     expect(application.status).toBe("verification_required");

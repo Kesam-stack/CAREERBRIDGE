@@ -223,38 +223,20 @@ function Login({ auth }: { auth: any }) {
   const navigate = useNavigate();
   const [email, setEmail] = useState("amara@careerbridge.test");
   const [password, setPassword] = useState("CareerBridgeDemo!2026");
-  const [otp, setOtp] = useState("");
-  const [challenge, setChallenge] = useState<{ id: string; devOtp?: string } | null>(null);
   const [error, setError] = useState("");
   async function submit(e: React.FormEvent) {
     e.preventDefault();
     setError("");
-    if (challenge) {
-      const res = await api("/api/auth/login/verify", { method: "POST", body: JSON.stringify({ challenge_id: challenge.id, otp }) });
-      const body = await res.json();
-      if (!res.ok) return setError(body.error ?? "OTP verification failed");
-      auth.setUser(body.user); auth.setCsrf(body.csrf);
-      navigate(body.user.role === "employer" ? "/employer/dashboard" : body.user.role === "admin" ? "/admin/passid" : "/dashboard");
-      return;
-    }
     const res = await api("/api/auth/login", { method: "POST", body: JSON.stringify({ email, password }) });
     const body = await res.json();
     if (!res.ok) return setError(body.error ?? "Login failed");
-    setChallenge({ id: body.challenge_id, devOtp: body.dev_otp });
-    setOtp(body.dev_otp ?? "");
+    auth.setUser(body.user); auth.setCsrf(body.csrf);
+    navigate(body.user.role === "employer" ? "/employer/dashboard" : body.user.role === "admin" ? "/admin/passid" : "/dashboard");
   }
-  return <AuthCard title={challenge ? "Enter OTP" : "Log in"} onSubmit={submit} error={error}>
-    {!challenge ? <>
-      <input value={email} onChange={(e) => setEmail(e.target.value)} placeholder="Email" />
-      <input value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Password" type="password" />
-      <button className="button" type="submit">Send OTP</button>
-    </> : <>
-      <div className="notice">We sent a one-time code for this login.</div>
-      <input value={otp} onChange={(e) => setOtp(e.target.value.replace(/\D/g, "").slice(0, 6))} placeholder="6-digit OTP" inputMode="numeric" />
-      <button className="button" type="submit">Verify and log in</button>
-      <button className="button secondary" type="button" onClick={() => { setChallenge(null); setOtp(""); }}>Use different credentials</button>
-      {challenge.devOtp && <div className="notice">Demo OTP: {challenge.devOtp}</div>}
-    </>}
+  return <AuthCard title="Log in" onSubmit={submit} error={error}>
+    <input value={email} onChange={(e) => setEmail(e.target.value)} placeholder="Email" />
+    <input value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Password" type="password" />
+    <button className="button" type="submit">Log in</button>
     <p className="auth-link-row">No account yet? <Link to="/signup">Create one now</Link></p>
     <DemoLogins />
   </AuthCard>;

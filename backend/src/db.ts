@@ -9,6 +9,27 @@ export interface CareerBridgeDb {
   close(): void;
 }
 
+const STORED_VERIFICATION_REQUIREMENTS = new Set([
+  "identity_verified",
+  "education_credential",
+  "employment_credential",
+  "work_authorization",
+  "account_ownership",
+  "income_verification",
+  "marketplace_uniqueness",
+  "custom_passid_credential",
+]);
+
+function jsonArray(value: unknown): string[] {
+  if (!value) return [];
+  try {
+    const parsed = JSON.parse(String(value));
+    return Array.isArray(parsed) ? parsed.map(String) : [];
+  } catch {
+    return [];
+  }
+}
+
 export function openCareerBridgeDb(path: string): CareerBridgeDb {
   if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true });
   const db = new Database(path, { create: true });
@@ -33,7 +54,9 @@ export function migrate(db: Database): void {
     )
   `);
   db.run(`CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id), csrf TEXT NOT NULL, expires_at INTEGER NOT NULL, created_at INTEGER NOT NULL)`);
-  db.run(`CREATE TABLE IF NOT EXISTS auth_otps (id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id), code_hash TEXT NOT NULL, expires_at INTEGER NOT NULL, used_at INTEGER, created_at INTEGER NOT NULL)`);
+  // OTP login has been retired. Remove the legacy challenge table (and any
+  // short-lived codes it contained) when upgrading an existing database.
+  db.run(`DROP TABLE IF EXISTS auth_otps`);
   db.run(`CREATE TABLE IF NOT EXISTS candidate_profiles (user_id TEXT PRIMARY KEY REFERENCES users(id), headline TEXT, education TEXT, experience TEXT, skills TEXT, passid_status TEXT NOT NULL DEFAULT 'not_connected')`);
   db.run(`CREATE TABLE IF NOT EXISTS organizations (id TEXT PRIMARY KEY, owner_user_id TEXT NOT NULL REFERENCES users(id), name TEXT NOT NULL, type TEXT NOT NULL DEFAULT 'employer', status TEXT NOT NULL DEFAULT 'pending', website TEXT, created_at INTEGER NOT NULL)`);
   db.run(`CREATE TABLE IF NOT EXISTS jobs (id TEXT PRIMARY KEY, organization_id TEXT NOT NULL REFERENCES organizations(id), title TEXT NOT NULL, location TEXT NOT NULL, work_mode TEXT NOT NULL, employment_type TEXT NOT NULL, compensation TEXT, description TEXT NOT NULL, qualifications TEXT, skills TEXT, deadline TEXT, verification_requirements TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'draft', created_at INTEGER NOT NULL)`);
@@ -44,6 +67,14 @@ export function migrate(db: Database): void {
   db.run(`CREATE TABLE IF NOT EXISTS verification_results (id TEXT PRIMARY KEY, application_id TEXT NOT NULL REFERENCES applications(id), candidate_user_id TEXT NOT NULL REFERENCES users(id), result_json TEXT NOT NULL, updated_at INTEGER NOT NULL)`);
   db.run(`CREATE TABLE IF NOT EXISTS passid_webhook_events (id TEXT PRIMARY KEY, type TEXT NOT NULL, passid_connection_id TEXT, processed_at INTEGER NOT NULL, payload_summary TEXT NOT NULL)`);
   db.run(`CREATE TABLE IF NOT EXISTS audit_logs (id TEXT PRIMARY KEY, actor_user_id TEXT, action TEXT NOT NULL, target_type TEXT, target_id TEXT, detail_json TEXT NOT NULL, created_at INTEGER NOT NULL)`);
+
+  for (const job of db.prepare("SELECT id, verification_requirements FROM jobs").all() as any[]) {
+    const requirements = jsonArray(job.verification_requirements).filter((req) => STORED_VERIFICATION_REQUIREMENTS.has(req));
+    const next = job.id === "job_demo" && !requirements.includes("income_verification") ? [...requirements, "income_verification"] : requirements;
+    if (JSON.stringify(next) !== String(job.verification_requirements)) {
+      db.prepare("UPDATE jobs SET verification_requirements=? WHERE id=?").run(JSON.stringify(next), job.id);
+    }
+  }
 }
 
 export function seed(db: Database): void {
@@ -58,5 +89,5 @@ export function seed(db: Database): void {
   db.prepare(`
     INSERT INTO jobs (id,organization_id,title,location,work_mode,employment_type,compensation,description,qualifications,skills,deadline,verification_requirements,status,created_at)
     VALUES ('job_demo','org_demo','Product Operations Internship','New York, NY','hybrid','internship','$28/hour','Support marketplace launch operations, partner onboarding, and trust operations.','Student or recent graduate with strong writing and analysis skills.','operations, fintech, SQL, customer research','2026-08-15',?,'published',?)
-  `).run(JSON.stringify(["identity_verified", "education_credential", "marketplace_uniqueness"]), now);
+  `).run(JSON.stringify(["identity_verified", "education_credential", "marketplace_uniqueness", "income_verification"]), now);
 }
