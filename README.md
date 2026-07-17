@@ -43,6 +43,7 @@ careerbridge/
 - `GET /api/employer/applicants/:id`
 - `POST /api/passid/connect/sessions`
 - `GET /api/passid/callback`
+- `GET /api/passid/connections`
 - `POST /api/passid/connections/:id/revoke`
 - `POST /api/webhooks/passid`
 - `GET /api/admin/passid`
@@ -65,7 +66,7 @@ careerbridge/
 Set real values in Railway. Do not commit secrets.
 
 ```env
-PASSID_API_BASE_URL=https://api.passid.io
+PASSID_API_BASE_URL=https://api.passid.io/api/sandbox/connect
 PASSID_SECRET_KEY=
 PASSID_PUBLISHABLE_KEY=
 PASSID_WEBHOOK_SECRET=
@@ -79,7 +80,7 @@ SESSION_SECRET=
 ENCRYPTION_KEY=
 ```
 
-`PASSID_ENVIRONMENT=live` rejects `sk_test_` and `pk_test_` keys. `PASSID_ENVIRONMENT=sandbox` rejects live keys.
+For approved live access, set `PASSID_API_BASE_URL=https://api.passid.io/v1/connect`. `PASSID_ENVIRONMENT=live` rejects `sk_test_` and `pk_test_` keys, and sandbox mode rejects live keys or the production Connect URL.
 
 ## Local Development
 
@@ -104,7 +105,9 @@ Password: `CareerBridgeDemo!2026`
 - Role-based access checks
 - Scope allowlist enforcement
 - PASSID callback state hashing and one-time use
-- Webhook HMAC verification, timestamp window, and replay protection
+- Webhook raw-body HMAC verification and event-ID replay protection
+- Idempotency keys on hosted-session creation
+- Server-side callback session verification and partial-consent handling
 - Sanitized admin views and audit logs
 - No PASSID secret key in frontend responses
 # CAREERBRIDGE

@@ -18,11 +18,9 @@ const requirementLabels: Record<string, string> = {
   marketplace_uniqueness: "Marketplace uniqueness",
   custom_passid_credential: "Custom PASSID credential"
 };
-const employerRequirementKeys = ["identity_verified", "work_authorization", "account_ownership", "income_verification"];
+const employerRequirementKeys = ["identity_verified", "account_ownership", "income_verification"];
 const privacyDataPermissions = [
   ["Identity", "Shared only after candidate consent"],
-  ["Education credential", "Status-only verification"],
-  ["Work authorization", "Eligibility status only"],
   ["Account ownership", "Ownership status only"],
   ["Income verification", "Status-only verification"],
 ];
@@ -539,7 +537,7 @@ function ApplicantDetail({ auth }: { auth: any }) {
   const verification = detail?.passid_verification ?? {};
   return <section className="page"><PageTitle title="Applicant detail" subtitle="Verification results are status-oriented and scoped." />
     <div className="detail-layout"><div className="data-panel"><h2>{detail?.applicant?.candidate_name ?? "Applicant"}</h2><p>{detail?.applicant?.title}</p><p>Stage: {detail?.applicant?.status}</p></div>
-      <aside className="side-panel"><h3>PASSID verification</h3>{["identity", "education", "account_ownership", "marketplace_uniqueness", "consent_status"].map((k) => <div className="check-row" key={k}><BadgeCheck size={17} />{titleCase(k)}: {verification[k] ?? "Not requested"}</div>)}</aside></div>
+      <aside className="side-panel"><h3>PASSID verification</h3>{["identity", "income", "account_ownership", "verification_status", "consent_status"].map((k) => <div className="check-row" key={k}><BadgeCheck size={17} />{titleCase(k)}: {verification[k] ?? "Not requested"}</div>)}</aside></div>
   </section>;
 }
 
@@ -559,7 +557,31 @@ function AdminPassid({ auth }: { auth: any }) {
 }
 
 function Settings({ auth }: { auth: any }) {
-  return <section className="page"><PageTitle title="Settings" subtitle="Account, privacy, consent, and access management." /><div className="data-panel"><h2>Privacy and consent</h2><p>CareerBridge never receives your PASSID secret credentials. Candidates can revoke CareerBridge access, which requires a new PASSID Connect flow to restore.</p></div></section>;
+  const [connections, setConnections] = useState<any[]>([]);
+  const [message, setMessage] = useState("");
+  async function refreshConnections() {
+    if (auth.user?.role !== "candidate") return;
+    const res = await api("/api/passid/connections");
+    const body = await res.json();
+    if (res.ok) setConnections(safeList(body.connections));
+  }
+  useEffect(() => { refreshConnections(); }, [auth.user?.role]);
+  async function revoke(id: string) {
+    const res = await api(`/api/passid/connections/${id}/revoke`, { method: "POST" }, auth.csrf);
+    const body = await res.json();
+    setMessage(res.ok ? "PASSID access revoked. Reconnect to verify this application again." : body.error ?? "Unable to revoke PASSID access.");
+    if (res.ok) await refreshConnections();
+  }
+  return <section className="page"><PageTitle title="Settings" subtitle="Account, privacy, consent, and access management." />
+    <div className="data-panel"><h2>Privacy and consent</h2><p>CareerBridge never receives your PASSID secret credentials. Candidates can revoke CareerBridge access, which requires a new PASSID Connect flow to restore.</p></div>
+    {message && <div className="notice">{message}</div>}
+    {auth.user?.role === "candidate" && <div className="data-panel"><h2>PASSID connections</h2>
+      {connections.length ? connections.map((connection) => <div className="check-row" key={connection.id}>
+        <span>{connection.title} · {connection.consent_status}</span>
+        <button className="button secondary" type="button" disabled={connection.consent_status === "revoked"} onClick={() => revoke(connection.id)}>Revoke access</button>
+      </div>) : <p>No PASSID connections are active for this account.</p>}
+    </div>}
+  </section>;
 }
 
 function PageTitle({ title, subtitle }: { title: string; subtitle: string }) {

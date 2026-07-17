@@ -11,13 +11,8 @@ export interface CareerBridgeDb {
 
 const STORED_VERIFICATION_REQUIREMENTS = new Set([
   "identity_verified",
-  "education_credential",
-  "employment_credential",
-  "work_authorization",
   "account_ownership",
   "income_verification",
-  "marketplace_uniqueness",
-  "custom_passid_credential",
 ]);
 
 function jsonArray(value: unknown): string[] {
@@ -89,5 +84,5 @@ export function seed(db: Database): void {
   db.prepare(`
     INSERT INTO jobs (id,organization_id,title,location,work_mode,employment_type,compensation,description,qualifications,skills,deadline,verification_requirements,status,created_at)
     VALUES ('job_demo','org_demo','Product Operations Internship','New York, NY','hybrid','internship','$28/hour','Support marketplace launch operations, partner onboarding, and trust operations.','Student or recent graduate with strong writing and analysis skills.','operations, fintech, SQL, customer research','2026-08-15',?,'published',?)
-  `).run(JSON.stringify(["identity_verified", "education_credential", "marketplace_uniqueness", "income_verification"]), now);
+  `).run(JSON.stringify(["identity_verified", "income_verification"]), now);
 }

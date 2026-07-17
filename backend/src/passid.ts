@@ -29,7 +29,8 @@ export interface CreatePassidSessionInput {
   purpose: string;
   return_url: string;
   application_reference: string;
-  state: string;
+  idempotency_key: string;
+  access_duration?: "90days" | "1year" | "permanent";
 }
 
 export interface PassidSession {
@@ -60,8 +61,12 @@ function normalizeBody(body: any): any {
 }
 
 export function createPassidClient(env: CareerBridgeEnv): PassidClient {
-  const base = env.PASSID_API_BASE_URL.replace(/\/+$/, "");
-  const MAX_RETRIES = 8;
+  const configuredBase = env.PASSID_API_BASE_URL.replace(/\/+$/, "");
+  const base = /\/(?:v1|api\/sandbox)\/connect$/.test(configuredBase)
+    ? configuredBase
+    : `${configuredBase}${env.PASSID_ENVIRONMENT === "sandbox" ? "/api/sandbox/connect" : "/v1/connect"}`;
+  const MAX_RETRIES = 3;
+
   function backoffMs(attempt: number, retryAfterSeconds?: number): number {
     if (retryAfterSeconds != null && Number.isFinite(retryAfterSeconds) && retryAfterSeconds > 0) {
       return retryAfterSeconds * 1000;
@@ -76,12 +81,10 @@ export function createPassidClient(env: CareerBridgeEnv): PassidClient {
     await passidSemaphore.acquire();
     let response: Response;
     try {
-      const authHeader = `Bearer ${env.PASSID_SECRET_KEY}`;
-      console.log("[passid request]", { path, attempt, secretKeyStart: env.PASSID_SECRET_KEY.substring(0, 20) });
       response = await fetch(`${base}${path}`, {
         ...init,
         headers: {
-          Authorization: authHeader,
+          Authorization: `Bearer ${env.PASSID_SECRET_KEY}`,
           "Content-Type": "application/json",
           ...(init.headers ?? {}),
         },
@@ -95,7 +98,7 @@ export function createPassidClient(env: CareerBridgeEnv): PassidClient {
       const retryAfterHeader = response.headers.get("retry-after");
       const retryAfterSeconds = retryAfterHeader ? Number(retryAfterHeader) : undefined;
       const delayMs = backoffMs(attempt, retryAfterSeconds);
-      console.warn(`[passid] rate limited, retrying in ${delayMs}ms`, { path, attempt, requestId, detail: body?.error ?? body?.message ?? body?.detail, retryAfterSeconds });
+      console.warn(`[passid] rate limited, retrying in ${delayMs}ms`, { path, attempt, requestId, retryAfterSeconds });
       await new Promise((resolve) => setTimeout(resolve, delayMs));
       return request(path, init, attempt + 1);
     }
@@ -103,12 +106,11 @@ export function createPassidClient(env: CareerBridgeEnv): PassidClient {
       const detail = body?.error ?? body?.message ?? body?.detail ?? body?.errors ?? "unknown_error";
       const retryAfterHeader = response.headers.get("retry-after");
       const retryAfterSeconds = retryAfterHeader ? Number(retryAfterHeader) : undefined;
-      console.error("[passid error response]", { 
-        path, 
-        status: response.status, 
-        detail,
-        fullBody: body,
-        secretKeyEnd: env.PASSID_SECRET_KEY.substring(env.PASSID_SECRET_KEY.length - 10)
+      console.error("[passid error response]", {
+        path,
+        status: response.status,
+        requestId,
+        errorCode: body?.error?.code,
       });
       const err = new Error(`PASSID_API_${response.status}:${typeof detail === "string" ? detail : JSON.stringify(detail)}`);
       (err as any).requestId = requestId;
@@ -123,15 +125,18 @@ export function createPassidClient(env: CareerBridgeEnv): PassidClient {
   return {
     async createSession(input) {
       try {
-        const { body } = await request("/v1/connect/sessions", {
+        const { body } = await request("/sessions", {
           method: "POST",
+          headers: { "Idempotency-Key": input.idempotency_key },
           body: JSON.stringify({
             scopes: input.scopes,
             purpose: input.purpose,
             return_url: input.return_url,
             application_reference: input.application_reference,
+            access_duration: input.access_duration ?? "90days",
           }),
         });
+        if (!body?.session_id || !body?.hosted_url) throw new Error("PASSID_INVALID_SESSION_RESPONSE");
         return {
           session_id: body.session_id,
           hosted_url: body.hosted_url,
@@ -143,18 +148,55 @@ export function createPassidClient(env: CareerBridgeEnv): PassidClient {
         (wrapped as any).status = (error as any)?.status;
         (wrapped as any).requestId = (error as any)?.requestId;
         (wrapped as any).body = (error as any)?.body;
+        (wrapped as any).retryAfterSeconds = (error as any)?.retryAfterSeconds;
         throw wrapped;
       }
     },
     async retrieveSession(sessionId) {
       try {
-        const { body, requestId } = await request(`/v1/connect/sessions/${encodeURIComponent(sessionId)}`);
+        const { body, requestId } = await request(`/sessions/${encodeURIComponent(sessionId)}`);
+        const grantedScopes = Array.isArray(body.granted_scopes) ? body.granted_scopes.map(String) : [];
+        const verification: Record<string, string> = {};
+
+        if (body.status === "approved" && body.connection_id) {
+          const connectionId = encodeURIComponent(String(body.connection_id));
+          const endpointForScope: Record<string, { path: string; key: string; objectKey?: string }> = {
+            "identity.read": { path: "identity", key: "identity", objectKey: "identity" },
+            "income.read": { path: "income", key: "income", objectKey: "income" },
+            "accounts.read": { path: "accounts", key: "account_ownership", objectKey: "accounts" },
+            "verification_status.read": { path: "verification-status", key: "verification_status" },
+          };
+
+          await Promise.all(grantedScopes.map(async (scope: string) => {
+            const endpoint = endpointForScope[scope];
+            if (!endpoint) return;
+            try {
+              const { body: endpointBody } = await request(`/connections/${connectionId}/${endpoint.path}`);
+              const value = endpoint.objectKey ? endpointBody?.[endpoint.objectKey] : endpointBody;
+              const explicitStatus = value?.verification_status ?? value?.status ?? endpointBody?.verification_status ?? endpointBody?.status;
+              const explicitVerified = value?.verified ?? endpointBody?.verified;
+              verification[endpoint.key] = typeof explicitStatus === "string"
+                ? explicitStatus
+                : typeof explicitVerified === "boolean"
+                  ? (explicitVerified ? "verified" : "not_verified")
+                  : "available";
+            } catch (error) {
+              console.warn("[passid data endpoint unavailable]", {
+                scope,
+                status: (error as any)?.status,
+                requestId: (error as any)?.requestId,
+              });
+              verification[endpoint.key] = "unavailable";
+            }
+          }));
+        }
+
         return {
           session_id: body.session_id ?? sessionId,
           status: body.status ?? "pending",
           connection_id: body.connection_id,
-          granted_scopes: Array.isArray(body.granted_scopes) ? body.granted_scopes : [],
-          verification: body.verification ?? {},
+          granted_scopes: grantedScopes,
+          verification,
           expires_at: body.expires_at,
           request_id: requestId,
         };
@@ -163,18 +205,20 @@ export function createPassidClient(env: CareerBridgeEnv): PassidClient {
         (wrapped as any).status = (error as any)?.status;
         (wrapped as any).requestId = (error as any)?.requestId;
         (wrapped as any).body = (error as any)?.body;
+        (wrapped as any).retryAfterSeconds = (error as any)?.retryAfterSeconds;
         throw wrapped;
       }
     },
     async revokeConnection(connectionId) {
       try {
-        const { body } = await request(`/v1/connect/connections/${encodeURIComponent(connectionId)}/revoke`, { method: "POST" });
+        const { body } = await request(`/connections/${encodeURIComponent(connectionId)}/revoke`, { method: "POST" });
         return { status: body.status ?? "revoked" };
       } catch (error) {
         const wrapped = new Error(`PASSID_REVOKE_FAILED:${redactError(error)}`);
         (wrapped as any).status = (error as any)?.status;
         (wrapped as any).requestId = (error as any)?.requestId;
         (wrapped as any).body = (error as any)?.body;
+        (wrapped as any).retryAfterSeconds = (error as any)?.retryAfterSeconds;
         throw wrapped;
       }
     },

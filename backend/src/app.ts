@@ -12,20 +12,15 @@ import { hashPassword, hmac, randomId, safeEqual, sanitizeScopes, verifyPassword
 
 const APPROVED_SCOPES = [
   "identity.read",
-  "education.read",
   "verification_status.read",
   "accounts.read",
   "income.read",
-  "marketplace_uniqueness.read",
 ];
 
 const REQUIREMENT_TO_SCOPE: Record<string, string> = {
   identity_verified: "identity.read",
-  education_credential: "education.read",
   income_verification: "income.read",
-  work_authorization: "verification_status.read",
   account_ownership: "accounts.read",
-  marketplace_uniqueness: "marketplace_uniqueness.read",
 };
 
 export interface AppOptions {
@@ -48,6 +43,21 @@ function jsonArray(value: unknown): string[] {
 
 function now() {
   return Date.now();
+}
+
+function passidReturnUrl(baseUrl: string, state: string): string {
+  const url = new URL(baseUrl);
+  url.searchParams.set("state", state);
+  return url.toString();
+}
+
+function isSafePassidHostedUrl(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" && (url.hostname === "passid.io" || url.hostname.endsWith(".passid.io"));
+  } catch {
+    return false;
+  }
 }
 
 function audit(db: Database, actor: string | null, action: string, targetType: string, targetId: string, detail: Record<string, unknown>) {
@@ -383,24 +393,31 @@ export function createCareerBridgeApp(options: AppOptions = {}) {
       const created = await passid.createSession({
         scopes,
         purpose: `CareerBridge verification for ${appRow.title}`,
-        return_url: `${env.PASSID_REDIRECT_URL}?state=${encodeURIComponent(state)}`,
+        return_url: passidReturnUrl(env.PASSID_REDIRECT_URL, state),
         application_reference: appRow.id,
-        state,
+        idempotency_key: sessionRecordId,
+        access_duration: "90days",
       });
-      if (/client_secret|secret=/i.test(created.hosted_url)) return c.json({ error: "unsafe_hosted_url" }, 502);
-      db.prepare("UPDATE passid_sessions SET passid_session_id=?, hosted_url=?, status=? WHERE id=?")
-        .run(created.session_id, created.hosted_url, created.status, sessionRecordId);
+      if (!isSafePassidHostedUrl(created.hosted_url) || /client_secret|secret=/i.test(created.hosted_url)) {
+        throw new Error("PASSID_UNSAFE_HOSTED_URL");
+      }
+      const upstreamExpiry = created.expires_at ? Date.parse(created.expires_at) : NaN;
+      const effectiveExpiry = Number.isFinite(upstreamExpiry) ? Math.min(expiresAt, upstreamExpiry) : expiresAt;
+      db.prepare("UPDATE passid_sessions SET passid_session_id=?, hosted_url=?, status=?, expires_at=? WHERE id=?")
+        .run(created.session_id, created.hosted_url, created.status, effectiveExpiry, sessionRecordId);
       audit(db, user.id, "passid.session.create", "application", appRow.id, { scopes, environment: env.PASSID_ENVIRONMENT });
-      return c.json({ hosted_url: created.hosted_url, session_id: created.session_id, expires_at: created.expires_at, requested_scopes: scopes });
+      return c.json({
+        hosted_url: created.hosted_url,
+        session_id: created.session_id,
+        expires_at: new Date(effectiveExpiry).toISOString(),
+        requested_scopes: scopes,
+      });
     } catch (error) {
       db.prepare("UPDATE passid_sessions SET status='failed' WHERE id=?").run(sessionRecordId);
-      const errorMsg = (error as any)?.message ?? String(error);
       const errorBody = (error as any)?.body ?? {};
       console.error("[passid.session.create error]", { 
         status: (error as any)?.status,
         code: errorBody?.error?.code,
-        message: errorBody?.error?.message,
-        detail: errorMsg,
         requestId: (error as any)?.requestId
       });
       const status = (error as any)?.status === 429 ? 429 : 502;
@@ -429,31 +446,88 @@ export function createCareerBridgeApp(options: AppOptions = {}) {
     const row = db.prepare("SELECT * FROM passid_sessions WHERE state_hash=?").get(stateHash) as any;
     if (!row || row.used_at || row.expires_at < now()) return c.redirect(`${env.APP_URL}/verification?result=invalid_state`);
     if (!row.passid_session_id) return c.redirect(`${env.APP_URL}/verification?result=session_missing`);
+    const callbackSessionId = c.req.query("session_id");
+    if (callbackSessionId && callbackSessionId !== row.passid_session_id) {
+      return c.redirect(`${env.APP_URL}/verification?result=invalid_state`);
+    }
     try {
       const result = await passid.retrieveSession(row.passid_session_id);
-      db.transaction(() => {
-        db.prepare("UPDATE passid_sessions SET used_at=?, status=? WHERE id=?").run(now(), result.status, row.id);
+      if (result.session_id !== row.passid_session_id) {
+        return c.redirect(`${env.APP_URL}/verification?result=session_mismatch`);
+      }
+      if (result.status === "pending" || result.status === "pending_customer") {
+        return c.redirect(`${env.APP_URL}/verification?result=pending`);
+      }
+      if (result.status !== "approved") {
+        db.prepare("UPDATE passid_sessions SET used_at=?, status=? WHERE id=? AND used_at IS NULL").run(now(), result.status, row.id);
+        audit(db, row.candidate_user_id, "passid.callback.complete", "application", row.application_id, { status: result.status });
+        return c.redirect(`${env.APP_URL}/verification?result=${encodeURIComponent(result.status)}`);
+      }
+      if (!result.connection_id) throw new Error("PASSID_APPROVED_WITHOUT_CONNECTION");
+
+      const requestedScopes = jsonArray(row.scopes);
+      const grantedScopes = sanitizeScopes(result.granted_scopes, requestedScopes);
+      const committed = db.transaction(() => {
+        const update = db.prepare("UPDATE passid_sessions SET used_at=?, status=? WHERE id=? AND used_at IS NULL").run(now(), result.status, row.id);
+        if (update.changes !== 1) return false;
         const connectionId = randomId("cbconn");
         db.prepare("INSERT INTO passid_connections (id,application_id,candidate_user_id,passid_session_id,connection_id,status,granted_scopes,consent_status,expires_at,last_api_request_id,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)")
-          .run(connectionId, row.application_id, row.candidate_user_id, row.passid_session_id, result.connection_id ?? null, result.status, JSON.stringify(result.granted_scopes), result.status === "approved" ? "active" : "pending", result.expires_at ? Date.parse(result.expires_at) : null, result.request_id ?? null, now(), now());
+          .run(connectionId, row.application_id, row.candidate_user_id, row.passid_session_id, result.connection_id, result.status, JSON.stringify(grantedScopes), "active", result.expires_at ? Date.parse(result.expires_at) : null, result.request_id ?? null, now(), now());
+        const scopeStatus = (scope: string, key: string) => requestedScopes.includes(scope)
+          ? (grantedScopes.includes(scope) ? (result.verification[key] ?? "available") : "not_granted")
+          : "not_requested";
         const safeResult = {
-          identity: result.verification.identity ?? (result.granted_scopes.includes("identity.read") ? "verified" : "not_requested"),
-          education: result.verification.education ?? (result.granted_scopes.includes("education.read") ? "verified" : "not_requested"),
-          account_ownership: result.verification.account_ownership ?? (result.granted_scopes.includes("account_ownership.read") ? "verified" : "not_requested"),
-          marketplace_uniqueness: result.verification.marketplace_uniqueness ?? (result.granted_scopes.includes("marketplace_uniqueness.read") ? "verified" : "not_requested"),
-          consent_status: result.status === "approved" ? "active" : "pending",
-          granted_scopes: result.granted_scopes,
+          identity: scopeStatus("identity.read", "identity"),
+          income: scopeStatus("income.read", "income"),
+          account_ownership: scopeStatus("accounts.read", "account_ownership"),
+          verification_status: scopeStatus("verification_status.read", "verification_status"),
+          consent_status: "active",
+          granted_scopes: grantedScopes,
           updated_at: new Date().toISOString(),
         };
+        const requiredStatuses = [
+          ["identity.read", safeResult.identity],
+          ["income.read", safeResult.income],
+          ["accounts.read", safeResult.account_ownership],
+          ["verification_status.read", safeResult.verification_status],
+        ].filter(([scope]) => requestedScopes.includes(scope));
+        const verificationComplete = requiredStatuses.every(([, status]) =>
+          !["not_granted", "not_verified", "unavailable"].includes(status),
+        );
         db.prepare("INSERT OR REPLACE INTO verification_results (id,application_id,candidate_user_id,result_json,updated_at) VALUES (?,?,?,?,?)")
           .run(randomId("vresult"), row.application_id, row.candidate_user_id, JSON.stringify(safeResult), now());
-        db.prepare("UPDATE applications SET status=?, updated_at=? WHERE id=?").run(result.status === "approved" ? "under_review" : "verification_required", now(), row.application_id);
-        audit(db, row.candidate_user_id, "passid.callback.complete", "application", row.application_id, { status: result.status });
+        db.prepare("UPDATE applications SET status=?, updated_at=? WHERE id=?").run(verificationComplete ? "under_review" : "verification_required", now(), row.application_id);
+        audit(db, row.candidate_user_id, "passid.callback.complete", "application", row.application_id, {
+          status: result.status,
+          verification_complete: verificationComplete,
+        });
+        return verificationComplete ? "complete" : "partial";
       })();
-      return c.redirect(`${env.APP_URL}/verification?result=success`);
+      if (!committed) return c.redirect(`${env.APP_URL}/verification?result=invalid_state`);
+      return c.redirect(`${env.APP_URL}/verification?result=${committed === "complete" ? "success" : "partial_consent"}`);
     } catch {
       return c.redirect(`${env.APP_URL}/verification?result=retrieve_failed`);
     }
+  });
+
+  app.get("/api/passid/connections", async (c) => {
+    const user = await requireUser(c, ["candidate"]);
+    if (user instanceof Response) return user;
+    const connections = db.prepare(`
+      SELECT pc.id, pc.application_id, pc.status, pc.consent_status, pc.granted_scopes,
+             pc.expires_at, pc.created_at, pc.updated_at, j.title
+      FROM passid_connections pc
+      JOIN applications a ON a.id=pc.application_id
+      JOIN jobs j ON j.id=a.job_id
+      WHERE pc.candidate_user_id=?
+      ORDER BY pc.created_at DESC
+    `).all(user.id) as any[];
+    return c.json({
+      connections: connections.map((connection) => ({
+        ...connection,
+        granted_scopes: jsonArray(connection.granted_scopes),
+      })),
+    });
   });
 
   app.post("/api/passid/connections/:id/revoke", async (c) => {
@@ -463,6 +537,7 @@ export function createCareerBridgeApp(options: AppOptions = {}) {
     if (csrf) return csrf;
     const row = db.prepare("SELECT * FROM passid_connections WHERE id=? AND candidate_user_id=?").get(c.req.param("id"), user.id) as any;
     if (!row) return c.json({ error: "not_found" }, 404);
+    if (row.consent_status === "revoked") return c.json({ ok: true, status: "revoked", already_revoked: true });
     try {
       if (row.connection_id) await passid.revokeConnection(row.connection_id);
     } catch {
@@ -471,6 +546,7 @@ export function createCareerBridgeApp(options: AppOptions = {}) {
     db.prepare("UPDATE passid_connections SET status='revoked', consent_status='revoked', updated_at=? WHERE id=?").run(now(), row.id);
     db.prepare("UPDATE verification_results SET result_json=?, updated_at=? WHERE application_id=?")
       .run(JSON.stringify({ status: "revoked", consent_status: "revoked", updated_at: new Date().toISOString() }), now(), row.application_id);
+    db.prepare("UPDATE applications SET status='verification_required', updated_at=? WHERE id=?").run(now(), row.application_id);
     audit(db, user.id, "passid.connection.revoke", "passid_connection", row.id, {});
     return c.json({ ok: true, status: "revoked" });
   });
@@ -499,20 +575,28 @@ export function createCareerBridgeApp(options: AppOptions = {}) {
     if (!verified.ok) return verified.response;
     const eventIdHeader = c.req.header("x-passid-event") ?? c.req.header("PassID-Event") ?? "";
 
-    const event = JSON.parse(verified.body);
-    const eventId = String(event.id ?? eventIdHeader ?? randomId("evt"));
+    let event: any;
+    try {
+      event = JSON.parse(verified.body);
+    } catch {
+      return c.json({ error: "invalid_json" }, 400);
+    }
+    const eventId = String(event.event_id ?? event.id ?? "");
+    if (!eventId) return c.json({ error: "missing_event_id" }, 400);
     const existing = db.prepare("SELECT id FROM passid_webhook_events WHERE id=?").get(eventId);
     if (existing) return c.json({ ok: true, duplicate: true });
-    const type = String(event.type ?? "unknown");
+    const type = String(event.event_type ?? event.type ?? eventIdHeader ?? "unknown");
     const connectionId = event.data?.connection_id ?? event.data?.passid_connection_id ?? null;
     db.prepare("INSERT INTO passid_webhook_events (id,type,passid_connection_id,processed_at,payload_summary) VALUES (?,?,?,?,?)")
       .run(eventId, type, connectionId, now(), JSON.stringify({ type, connection_id: connectionId, status: event.data?.status ?? null }));
-    if (connectionId && /revoked|consent\.revoked|connection\.revoked/.test(type)) {
+    if (connectionId && /revoked|consent\.revoked|connection\.revoked|connection\.expired/.test(type)) {
       const conn = db.prepare("SELECT * FROM passid_connections WHERE connection_id=?").get(connectionId) as any;
       if (conn) {
-        db.prepare("UPDATE passid_connections SET status='revoked', consent_status='revoked', last_webhook_event=?, updated_at=? WHERE id=?").run(type, now(), conn.id);
+        const lifecycleStatus = type === "connection.expired" ? "expired" : "revoked";
+        db.prepare("UPDATE passid_connections SET status=?, consent_status=?, last_webhook_event=?, updated_at=? WHERE id=?").run(lifecycleStatus, lifecycleStatus, type, now(), conn.id);
         db.prepare("UPDATE verification_results SET result_json=?, updated_at=? WHERE application_id=?")
-          .run(JSON.stringify({ status: "revoked", consent_status: "revoked", updated_at: new Date().toISOString() }), now(), conn.application_id);
+          .run(JSON.stringify({ status: lifecycleStatus, consent_status: lifecycleStatus, updated_at: new Date().toISOString() }), now(), conn.application_id);
+        db.prepare("UPDATE applications SET status='verification_required', updated_at=? WHERE id=?").run(now(), conn.application_id);
       }
     }
     return c.json({ ok: true });

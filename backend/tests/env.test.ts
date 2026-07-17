@@ -32,4 +32,9 @@ describe("CareerBridge production environment validation", () => {
     const issues = getEnvironmentIssues({ ...complete, APP_URL: "http://careerbridge.example" });
     expect(issues).toContain("APP_URL: must use https in production");
   });
+
+  it("rejects a sandbox Connect base URL in live mode", () => {
+    const issues = getEnvironmentIssues({ ...complete, PASSID_API_BASE_URL: "https://api.passid.io/api/sandbox/connect" });
+    expect(issues).toContain("PASSID_API_BASE_URL: sandbox Connect URL cannot be used in live mode");
+  });
 });

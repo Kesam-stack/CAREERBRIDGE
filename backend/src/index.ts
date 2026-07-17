@@ -6,8 +6,8 @@ const env = loadEnv();
 console.log("[startup] PASSID config:", {
   environment: env.PASSID_ENVIRONMENT,
   baseUrl: env.PASSID_API_BASE_URL,
-  secretKeyStart: env.PASSID_SECRET_KEY.substring(0, 20),
-  publishableKeyStart: env.PASSID_PUBLISHABLE_KEY.substring(0, 20),
+  secretKeyConfigured: Boolean(env.PASSID_SECRET_KEY),
+  webhookSecretConfigured: Boolean(env.PASSID_WEBHOOK_SECRET),
 });
 const { app } = createCareerBridgeApp({ env });
 

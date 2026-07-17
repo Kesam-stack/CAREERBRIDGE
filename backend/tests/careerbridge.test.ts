@@ -4,7 +4,7 @@ import { createCareerBridgeApp } from "../src/app";
 import { migrate, seed } from "../src/db";
 import type { CareerBridgeEnv } from "../src/env";
 import { hmac, randomId } from "../src/security";
-import type { PassidClient } from "../src/passid";
+import { createPassidClient, type PassidClient } from "../src/passid";
 
 const baseEnv: CareerBridgeEnv = {
   NODE_ENV: "test",
@@ -14,7 +14,7 @@ const baseEnv: CareerBridgeEnv = {
   DATABASE_URL: ":memory:",
   SESSION_SECRET: "test_session_secret_32_bytes_long",
   ENCRYPTION_KEY: "test_encryption_key_32_bytes_long",
-  PASSID_API_BASE_URL: "https://api.passid.io",
+  PASSID_API_BASE_URL: "https://api.passid.io/api/sandbox/connect",
   PASSID_SECRET_KEY: "sk_test_careerbridge_safe_test_key",
   PASSID_PUBLISHABLE_KEY: "pk_test_careerbridge",
   PASSID_WEBHOOK_SECRET: "whsec_test_careerbridge_very_secret",
@@ -41,8 +41,8 @@ function mockPassid(): PassidClient {
         session_id: sessionId,
         status: "approved",
         connection_id: "conn_sandbox_test_123",
-        granted_scopes: ["identity.read", "education.read", "marketplace_uniqueness.read"],
-        verification: { identity: "verified", education: "verified", marketplace_uniqueness: "verified" },
+        granted_scopes: ["identity.read", "income.read"],
+        verification: { identity: "verified", income: "verified" },
         expires_at: new Date(Date.now() + 86_400_000).toISOString(),
         request_id: "req_passid_test",
       };
@@ -312,11 +312,47 @@ describe("CareerBridge independent PASSID institution app", () => {
     const result = db.prepare("SELECT result_json FROM verification_results WHERE application_id=?").get(application.id) as any;
     const parsed = JSON.parse(result.result_json);
     expect(parsed.identity).toBe("verified");
-    expect(parsed.education).toBe("verified");
+    expect(parsed.income).toBe("verified");
+    expect(parsed.education).toBeUndefined();
     expect(JSON.stringify(parsed)).not.toContain("bank");
 
     const reused = await app.request(`/api/passid/callback?state=${state}`, { redirect: "manual" });
     expect(reused.headers.get("location")).toContain("invalid_state");
+  });
+
+  it("keeps an application in verification when PASSID grants only some required scopes", async () => {
+    const db = new Database(":memory:");
+    migrate(db);
+    seed(db);
+    const partialPassid: PassidClient = {
+      ...mockPassid(),
+      async retrieveSession(sessionId) {
+        return {
+          session_id: sessionId,
+          status: "approved",
+          connection_id: "conn_sandbox_partial",
+          granted_scopes: ["identity.read"],
+          verification: { identity: "verified" },
+        };
+      },
+    };
+    const created = createCareerBridgeApp({ env: baseEnv, db, passidClient: partialPassid });
+    const auth = await login(created.app, "amara@careerbridge.test");
+    const application = await applyToDemoJob(created.app, auth);
+    await created.app.request("/api/passid/connect/sessions", {
+      method: "POST",
+      headers: { Cookie: auth.cookie, "Content-Type": "application/json", "X-CSRF-Token": auth.csrf },
+      body: JSON.stringify({ application_id: application.id }),
+    });
+    const state = "state_partial_consent";
+    db.prepare("UPDATE passid_sessions SET state_hash=? WHERE application_id=?").run(hmac(state, baseEnv.SESSION_SECRET), application.id);
+
+    const callback = await created.app.request(`/api/passid/callback?state=${state}`, { redirect: "manual" });
+    expect(callback.headers.get("location")).toContain("result=partial_consent");
+    const applicationRow = db.prepare("SELECT status FROM applications WHERE id=?").get(application.id) as any;
+    expect(applicationRow.status).toBe("verification_required");
+    const resultRow = db.prepare("SELECT result_json FROM verification_results WHERE application_id=?").get(application.id) as any;
+    expect(JSON.parse(resultRow.result_json).income).toBe("not_granted");
   });
 
   it("keeps employers inside their applicant boundary and shows status-oriented PASSID results only", async () => {
@@ -347,7 +383,7 @@ describe("CareerBridge independent PASSID institution app", () => {
     db.prepare("INSERT INTO applications (id,job_id,candidate_user_id,status,created_at,updated_at) VALUES ('app_webhook','job_demo','candidate_demo','under_review',?,?)").run(Date.now(), Date.now());
     db.prepare("INSERT INTO passid_connections (id,application_id,candidate_user_id,passid_session_id,connection_id,status,granted_scopes,consent_status,created_at,updated_at) VALUES ('cbconn_1','app_webhook','candidate_demo','pcs_1','conn_sandbox_test_123','approved','[\"identity.read\"]','active',?,?)").run(Date.now(), Date.now());
     db.prepare("INSERT INTO verification_results (id,application_id,candidate_user_id,result_json,updated_at) VALUES ('vr_webhook','app_webhook','candidate_demo',?,?)").run(JSON.stringify({ identity: "verified", consent_status: "active" }), Date.now());
-    const payload = JSON.stringify({ id: "evt_1", type: "connection.revoked", data: { connection_id: "conn_sandbox_test_123", status: "revoked" } });
+    const payload = JSON.stringify({ event_id: "evt_1", event_type: "connection.revoked", created_at: new Date().toISOString(), data: { connection_id: "conn_sandbox_test_123", status: "revoked" } });
     const sig = hmac(payload, baseEnv.PASSID_WEBHOOK_SECRET);
     const catcher = await app.request("/api/institution/webhook-catcher", {
       method: "POST",
@@ -382,6 +418,18 @@ describe("CareerBridge independent PASSID institution app", () => {
     const ok = await app.request("/api/passid/connections/cbconn_revoke/revoke", { method: "POST", headers: { Cookie: auth.cookie, "X-CSRF-Token": auth.csrf } });
     expect(ok.status).toBe(200);
     expect((await ok.json() as any).status).toBe("revoked");
+    const applicationAfterRevoke = db.prepare("SELECT status FROM applications WHERE id=?").get(application.id) as any;
+    expect(applicationAfterRevoke.status).toBe("verification_required");
+
+    const connections = await app.request("/api/passid/connections", { headers: { Cookie: auth.cookie } });
+    expect(connections.status).toBe(200);
+    const listed = await connections.json() as any;
+    expect(listed.connections[0].id).toBe("cbconn_revoke");
+    expect(listed.connections[0].granted_scopes).toEqual(["identity.read"]);
+
+    const repeated = await app.request("/api/passid/connections/cbconn_revoke/revoke", { method: "POST", headers: { Cookie: auth.cookie, "X-CSRF-Token": auth.csrf } });
+    expect(repeated.status).toBe(200);
+    expect((await repeated.json() as any).already_revoked).toBe(true);
   });
 
   it("creates a new account and signs the user in immediately", async () => {
@@ -449,5 +497,62 @@ describe("CareerBridge independent PASSID institution app", () => {
     const publicJobs = await app.request("/api/jobs");
     const publicBody = await publicJobs.json() as any;
     expect(publicBody.jobs.some((job: any) => job.id === created.id)).toBe(true);
+  });
+});
+
+describe("PASSID HTTP client contract", () => {
+  it("uses the documented sandbox paths, idempotency header, and server-side status lookup", async () => {
+    const originalFetch = globalThis.fetch;
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      calls.push({ url, init });
+      if (url.endsWith("/sessions") && init?.method === "POST") {
+        return new Response(JSON.stringify({
+          data: {
+            session_id: "pcs_sandbox_contract",
+            hosted_url: "https://app.passid.io/connect/authorize?session=pcs_sandbox_contract",
+            status: "pending_customer",
+            expires_at: "2026-07-17T18:00:00.000Z",
+          },
+        }), { status: 201, headers: { "Content-Type": "application/json" } });
+      }
+      if (url.endsWith("/sessions/pcs_sandbox_contract")) {
+        return Response.json({
+          data: {
+            session_id: "pcs_sandbox_contract",
+            status: "approved",
+            connection_id: "conn_sandbox_contract",
+            granted_scopes: ["identity.read"],
+          },
+        });
+      }
+      if (url.endsWith("/connections/conn_sandbox_contract/identity")) {
+        return Response.json({ data: { identity: { verification_status: "verified" } } });
+      }
+      throw new Error(`Unexpected PASSID request: ${url}`);
+    }) as typeof fetch;
+
+    try {
+      const client = createPassidClient(baseEnv);
+      await client.createSession({
+        scopes: ["identity.read"],
+        purpose: "CareerBridge contract test",
+        return_url: "https://api.careerbridge.test/api/passid/callback?state=safe",
+        application_reference: "app_contract",
+        idempotency_key: "cbsess_contract",
+      });
+      const result = await client.retrieveSession("pcs_sandbox_contract");
+
+      expect(calls[0]?.url).toBe("https://api.passid.io/api/sandbox/connect/sessions");
+      expect(new Headers(calls[0]?.init?.headers).get("Idempotency-Key")).toBe("cbsess_contract");
+      const requestBody = JSON.parse(String(calls[0]?.init?.body));
+      expect(requestBody.access_duration).toBe("90days");
+      expect(requestBody.state).toBeUndefined();
+      expect(result.connection_id).toBe("conn_sandbox_contract");
+      expect(result.verification.identity).toBe("verified");
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
 });

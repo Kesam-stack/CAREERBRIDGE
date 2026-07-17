@@ -78,6 +78,13 @@ export function getEnvironmentIssues(source: Record<string, string | undefined> 
   if (env === "sandbox" && (secret.startsWith("sk_live_") || publishable.startsWith("pk_live_"))) {
     issues.push("PASSID credentials: live keys cannot be used in sandbox mode");
   }
+  const apiBase = read(source, "PASSID_API_BASE_URL").replace(/\/+$/, "");
+  if (env === "sandbox" && /\/v1\/connect$/.test(apiBase)) {
+    issues.push("PASSID_API_BASE_URL: production Connect URL cannot be used in sandbox mode");
+  }
+  if (env === "live" && /\/api\/sandbox\/connect$/.test(apiBase)) {
+    issues.push("PASSID_API_BASE_URL: sandbox Connect URL cannot be used in live mode");
+  }
   return Array.from(new Set(issues));
 }
 
@@ -88,6 +95,7 @@ export function loadEnv(source: Record<string, string | undefined> = process.env
     for (const issue of issues) console.error(`- ${issue}`);
     throw new Error("Invalid production environment");
   }
+  const passidEnvironment = (read(source, "PASSID_ENVIRONMENT") || "sandbox") as PassidEnvironment;
   return {
     NODE_ENV: read(source, "NODE_ENV") || "development",
     PORT: Number(read(source, "PORT") || 4100),
@@ -96,11 +104,12 @@ export function loadEnv(source: Record<string, string | undefined> = process.env
     DATABASE_URL: read(source, "DATABASE_URL") || "careerbridge/database/careerbridge.db",
     SESSION_SECRET: read(source, "SESSION_SECRET") || "dev_session_secret_32_bytes_minimum",
     ENCRYPTION_KEY: read(source, "ENCRYPTION_KEY") || "dev_encryption_key_32_bytes_min",
-    PASSID_API_BASE_URL: read(source, "PASSID_API_BASE_URL") || "https://api.passid.io",
+    PASSID_API_BASE_URL: read(source, "PASSID_API_BASE_URL")
+      || (passidEnvironment === "sandbox" ? "https://api.passid.io/api/sandbox/connect" : "https://api.passid.io/v1/connect"),
     PASSID_SECRET_KEY: read(source, "PASSID_SECRET_KEY") || "sk_test_local_careerbridge",
     PASSID_PUBLISHABLE_KEY: read(source, "PASSID_PUBLISHABLE_KEY") || "pk_test_local_careerbridge",
     PASSID_WEBHOOK_SECRET: read(source, "PASSID_WEBHOOK_SECRET") || "whsec_test_local_careerbridge",
-    PASSID_ENVIRONMENT: (read(source, "PASSID_ENVIRONMENT") || "sandbox") as PassidEnvironment,
+    PASSID_ENVIRONMENT: passidEnvironment,
     PASSID_REDIRECT_URL: read(source, "PASSID_REDIRECT_URL") || "http://localhost:4100/api/passid/callback",
     PASSID_WEBHOOK_URL: read(source, "PASSID_WEBHOOK_URL") || "http://localhost:4100/api/webhooks/passid",
   };
