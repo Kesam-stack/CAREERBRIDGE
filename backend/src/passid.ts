@@ -51,6 +51,7 @@ export interface PassidConnectionResult {
 }
 
 export interface PassidClient {
+  checkConnection(): Promise<{ active: boolean; environment?: string; request_id?: string }>;
   createSession(input: CreatePassidSessionInput): Promise<PassidSession>;
   retrieveSession(sessionId: string): Promise<PassidConnectionResult>;
   revokeConnection(connectionId: string): Promise<{ status: string }>;
@@ -123,6 +124,14 @@ export function createPassidClient(env: CareerBridgeEnv): PassidClient {
   }
 
   return {
+    async checkConnection() {
+      const { body, requestId } = await request("/keys");
+      return {
+        active: body?.active !== false,
+        environment: body?.environment ? String(body.environment) : undefined,
+        request_id: requestId,
+      };
+    },
     async createSession(input) {
       try {
         const { body } = await request("/sessions", {

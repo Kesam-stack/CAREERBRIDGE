@@ -53,32 +53,39 @@ function requireHttpsUrl(source: Record<string, string | undefined>, name: strin
 }
 
 export function getEnvironmentIssues(source: Record<string, string | undefined> = process.env): string[] {
+  // PassID's current integration guide calls these PASSID_CONNECT_KEY and
+  // PASSID_CONNECT_BASE. Keep the original names as backwards-compatible
+  // aliases so existing Railway deployments can rotate without downtime.
+  const normalized = {
+    ...source,
+    PASSID_API_BASE_URL: read(source, "PASSID_CONNECT_BASE") || read(source, "PASSID_API_BASE_URL"),
+    PASSID_SECRET_KEY: read(source, "PASSID_CONNECT_KEY") || read(source, "PASSID_SECRET_KEY"),
+  };
   const issues: string[] = [];
-  const production = isProd(source);
+  const production = isProd(normalized);
 
-  requireHttpsUrl(source, "APP_URL", issues);
-  requireHttpsUrl(source, "API_URL", issues);
-  requireValue(source, "DATABASE_URL", issues);
-  requireValue(source, "SESSION_SECRET", issues, production ? 32 : 16);
-  requireValue(source, "ENCRYPTION_KEY", issues, production ? 32 : 16);
-  requireHttpsUrl(source, "PASSID_API_BASE_URL", issues);
-  requireValue(source, "PASSID_SECRET_KEY", issues, production ? 24 : 8);
-  requireValue(source, "PASSID_PUBLISHABLE_KEY", issues, production ? 12 : 8);
-  requireValue(source, "PASSID_WEBHOOK_SECRET", issues, production ? 24 : 8);
-  requireHttpsUrl(source, "PASSID_REDIRECT_URL", issues);
-  requireHttpsUrl(source, "PASSID_WEBHOOK_URL", issues);
+  requireHttpsUrl(normalized, "APP_URL", issues);
+  requireHttpsUrl(normalized, "API_URL", issues);
+  requireValue(normalized, "DATABASE_URL", issues);
+  requireValue(normalized, "SESSION_SECRET", issues, production ? 32 : 16);
+  requireValue(normalized, "ENCRYPTION_KEY", issues, production ? 32 : 16);
+  requireHttpsUrl(normalized, "PASSID_API_BASE_URL", issues);
+  requireValue(normalized, "PASSID_SECRET_KEY", issues, production ? 24 : 8);
+  requireValue(normalized, "PASSID_WEBHOOK_SECRET", issues, production ? 24 : 8);
+  requireHttpsUrl(normalized, "PASSID_REDIRECT_URL", issues);
+  requireHttpsUrl(normalized, "PASSID_WEBHOOK_URL", issues);
 
-  const env = read(source, "PASSID_ENVIRONMENT");
+  const env = read(normalized, "PASSID_ENVIRONMENT");
   if (env !== "sandbox" && env !== "live") issues.push("PASSID_ENVIRONMENT: must be sandbox or live");
-  const secret = read(source, "PASSID_SECRET_KEY");
-  const publishable = read(source, "PASSID_PUBLISHABLE_KEY");
+  const secret = read(normalized, "PASSID_SECRET_KEY");
+  const publishable = read(normalized, "PASSID_PUBLISHABLE_KEY");
   if (env === "live" && (secret.startsWith("sk_test_") || publishable.startsWith("pk_test_"))) {
     issues.push("PASSID credentials: sandbox keys cannot be used in live mode");
   }
   if (env === "sandbox" && (secret.startsWith("sk_live_") || publishable.startsWith("pk_live_"))) {
     issues.push("PASSID credentials: live keys cannot be used in sandbox mode");
   }
-  const apiBase = read(source, "PASSID_API_BASE_URL").replace(/\/+$/, "");
+  const apiBase = read(normalized, "PASSID_API_BASE_URL").replace(/\/+$/, "");
   if (env === "sandbox" && /\/v1\/connect$/.test(apiBase)) {
     issues.push("PASSID_API_BASE_URL: production Connect URL cannot be used in sandbox mode");
   }
@@ -104,10 +111,10 @@ export function loadEnv(source: Record<string, string | undefined> = process.env
     DATABASE_URL: read(source, "DATABASE_URL") || "careerbridge/database/careerbridge.db",
     SESSION_SECRET: read(source, "SESSION_SECRET") || "dev_session_secret_32_bytes_minimum",
     ENCRYPTION_KEY: read(source, "ENCRYPTION_KEY") || "dev_encryption_key_32_bytes_min",
-    PASSID_API_BASE_URL: read(source, "PASSID_API_BASE_URL")
+    PASSID_API_BASE_URL: read(source, "PASSID_CONNECT_BASE") || read(source, "PASSID_API_BASE_URL")
       || (passidEnvironment === "sandbox" ? "https://api.passid.io/api/sandbox/connect" : "https://api.passid.io/v1/connect"),
-    PASSID_SECRET_KEY: read(source, "PASSID_SECRET_KEY") || "sk_test_local_careerbridge",
-    PASSID_PUBLISHABLE_KEY: read(source, "PASSID_PUBLISHABLE_KEY") || "pk_test_local_careerbridge",
+    PASSID_SECRET_KEY: read(source, "PASSID_CONNECT_KEY") || read(source, "PASSID_SECRET_KEY") || "sk_test_local_careerbridge",
+    PASSID_PUBLISHABLE_KEY: read(source, "PASSID_PUBLISHABLE_KEY"),
     PASSID_WEBHOOK_SECRET: read(source, "PASSID_WEBHOOK_SECRET") || "whsec_test_local_careerbridge",
     PASSID_ENVIRONMENT: passidEnvironment,
     PASSID_REDIRECT_URL: read(source, "PASSID_REDIRECT_URL") || "http://localhost:4100/api/passid/callback",

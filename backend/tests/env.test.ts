@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { getEnvironmentIssues } from "../src/env";
+import { getEnvironmentIssues, loadEnv } from "../src/env";
 
 describe("CareerBridge production environment validation", () => {
   const complete = {
@@ -36,5 +36,19 @@ describe("CareerBridge production environment validation", () => {
   it("rejects a sandbox Connect base URL in live mode", () => {
     const issues = getEnvironmentIssues({ ...complete, PASSID_API_BASE_URL: "https://api.passid.io/api/sandbox/connect" });
     expect(issues).toContain("PASSID_API_BASE_URL: sandbox Connect URL cannot be used in live mode");
+  });
+
+  it("accepts the current PassID Connect variable names", () => {
+    const source = {
+      ...complete,
+      PASSID_API_BASE_URL: undefined,
+      PASSID_SECRET_KEY: undefined,
+      PASSID_CONNECT_BASE: "https://api.passid.io/v1/connect",
+      PASSID_CONNECT_KEY: "sk_live_" + "z".repeat(32),
+    };
+    expect(getEnvironmentIssues(source)).toEqual([]);
+    const env = loadEnv(source);
+    expect(env.PASSID_API_BASE_URL).toBe(source.PASSID_CONNECT_BASE);
+    expect(env.PASSID_SECRET_KEY).toBe(source.PASSID_CONNECT_KEY);
   });
 });

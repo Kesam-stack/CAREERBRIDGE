@@ -1,7 +1,7 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { BrowserRouter, Link, NavLink, Route, Routes, useNavigate, useParams, useSearchParams } from "react-router-dom";
-import { BadgeCheck, BriefcaseBusiness, Building2, CalendarClock, CheckCircle2, ChevronRight, ClipboardList, Copy, ExternalLink, KeyRound, Layers3, LockKeyhole, QrCode, ScanLine, Search, ShieldCheck, Smartphone, Sparkles, UserRoundCheck, UsersRound, Webhook, XCircle } from "lucide-react";
+import { BadgeCheck, BriefcaseBusiness, Building2, CalendarClock, CheckCircle2, ChevronRight, ClipboardList, Copy, ExternalLink, KeyRound, Layers3, LockKeyhole, Search, ShieldCheck, Smartphone, Sparkles, UserRoundCheck, UsersRound, Webhook, XCircle } from "lucide-react";
 import "./styles.css";
 
 type User = { id: string; email: string; role: "candidate" | "employer" | "university" | "admin"; name: string };
@@ -204,13 +204,8 @@ function Landing({ auth }: { auth: any }) {
         <FeatureCard title="Employer clarity" text="Every role lists what it needs up front, so applicants know what will be verified." />
         <FeatureCard title="Institution ready" text="Universities and administrators can support verified workflows without seeing secrets." />
       </div>
-      {!auth.user && <DemoLogins />}
     </section>
   );
-}
-
-function DemoLogins() {
-  return <div className="notice">Demo users: Amara Okafor, Daniel Rivera, and Priya Chen. Use amara@careerbridge.test, recruiter@careerbridge.test, or admin@careerbridge.test with password CareerBridgeDemo!2026.</div>;
 }
 
 function Metric({ icon, label, value }: { icon: React.ReactNode; label: string; value: string }) {
@@ -219,8 +214,8 @@ function Metric({ icon, label, value }: { icon: React.ReactNode; label: string; 
 
 function Login({ auth }: { auth: any }) {
   const navigate = useNavigate();
-  const [email, setEmail] = useState("amara@careerbridge.test");
-  const [password, setPassword] = useState("CareerBridgeDemo!2026");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   async function submit(e: React.FormEvent) {
     e.preventDefault();
@@ -236,13 +231,12 @@ function Login({ auth }: { auth: any }) {
     <input value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Password" type="password" />
     <button className="button" type="submit">Log in</button>
     <p className="auth-link-row">No account yet? <Link to="/signup">Create one now</Link></p>
-    <DemoLogins />
   </AuthCard>;
 }
 
 function Signup({ auth, forcedRole }: { auth: any; forcedRole?: string }) {
   const navigate = useNavigate();
-  const [form, setForm] = useState({ name: "", email: "", password: "", role: forcedRole ?? "candidate" });
+  const [form, setForm] = useState({ name: "", email: "", password: "", role: forcedRole ?? "candidate", organization_name: "", website: "", accepted_terms: false });
   const [error, setError] = useState("");
   async function submit(e: React.FormEvent) {
     e.preventDefault();
@@ -256,10 +250,15 @@ function Signup({ auth, forcedRole }: { auth: any; forcedRole?: string }) {
   return <AuthCard title={forcedRole === "employer" ? "Employer registration" : "Create your profile"} onSubmit={submit} error={error}>
     <input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="Full name" aria-label="Full name" required minLength={2} />
     <input value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} placeholder="Email" type="email" required />
-    <input value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} placeholder="Password" type="password" required minLength={10} />
-    {!forcedRole && <select value={form.role} onChange={(e) => setForm({ ...form, role: e.target.value })} required><option value="candidate">Candidate</option><option value="employer">Employer</option><option value="university">University partner</option></select>}
+    <input value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} placeholder="Password (12+ characters, upper/lowercase and number)" type="password" required minLength={12} maxLength={128} />
+    {!forcedRole && <select value={form.role} onChange={(e) => setForm({ ...form, role: e.target.value })} required><option value="candidate">Candidate</option><option value="employer">Employer</option></select>}
+    {form.role === "employer" && <>
+      <input value={form.organization_name} onChange={(e) => setForm({ ...form, organization_name: e.target.value })} placeholder="Registered organization name" required minLength={2} />
+      <input value={form.website} onChange={(e) => setForm({ ...form, website: e.target.value })} placeholder="Organization website (optional)" type="url" />
+    </>}
+    <label className="check-row"><input type="checkbox" checked={form.accepted_terms} onChange={(e) => setForm({ ...form, accepted_terms: e.target.checked })} required />I confirm these details are accurate and consent to account creation.</label>
     <button className="button" type="submit">Create account</button>
-    <div className="notice">Example names: Amara Okafor, Daniel Rivera, and Priya Chen.</div>
+    <div className="notice">Employer organizations are created as pending and must be approved before publishing roles. PASSID institution access is configured separately with your registered Connect key.</div>
     <p className="auth-link-row">Already have an account? <Link to="/login">Log in</Link></p>
   </AuthCard>;
 }
@@ -368,58 +367,8 @@ function Verification({ auth }: { auth: any }) {
   const [apps, setApps] = useState<Application[]>([]);
   const [message, setMessage] = useState("");
   const [walletSession, setWalletSession] = useState<{ applicationTitle: string; hostedUrl: string; expiresAt?: string; requestedScopes: string[] } | null>(null);
-  const [qrValue, setQrValue] = useState("");
-  const [scannerStatus, setScannerStatus] = useState("");
-  const videoRef = useRef<HTMLVideoElement | null>(null);
-  const streamRef = useRef<MediaStream | null>(null);
-  const scanTimerRef = useRef<number | null>(null);
   const [params] = useSearchParams();
   useEffect(() => { api("/api/applications").then((r) => r.json()).then((b) => setApps(safeList(b.applications))); }, []);
-  function stopScanner() {
-    if (scanTimerRef.current) window.clearInterval(scanTimerRef.current);
-    scanTimerRef.current = null;
-    streamRef.current?.getTracks().forEach((track) => track.stop());
-    streamRef.current = null;
-    if (videoRef.current) videoRef.current.srcObject = null;
-  }
-  useEffect(() => stopScanner, []);
-  function openInstitutionRequest(value = qrValue) {
-    const next = value.trim();
-    if (!next) return setMessage("Scan or paste the institution QR request first.");
-    if (/^https?:\/\//i.test(next) || next.startsWith("/")) {
-      window.location.assign(next);
-      return;
-    }
-    setMessage(`Institution request code captured: ${next}`);
-  }
-  async function startScanner() {
-    setScannerStatus("");
-    const Detector = (window as any).BarcodeDetector;
-    if (!Detector || !navigator.mediaDevices?.getUserMedia) {
-      setScannerStatus("Camera QR scanning is not available in this browser. Paste the institution QR link or code instead.");
-      return;
-    }
-    try {
-      const detector = new Detector({ formats: ["qr_code"] });
-      const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
-      streamRef.current = stream;
-      if (!videoRef.current) return;
-      videoRef.current.srcObject = stream;
-      await videoRef.current.play();
-      scanTimerRef.current = window.setInterval(async () => {
-        if (!videoRef.current) return;
-        const codes = await detector.detect(videoRef.current);
-        const rawValue = codes?.[0]?.rawValue;
-        if (!rawValue) return;
-        setQrValue(rawValue);
-        stopScanner();
-        openInstitutionRequest(rawValue);
-      }, 800);
-    } catch {
-      stopScanner();
-      setScannerStatus("Unable to start camera scanning. Paste the institution QR link or code instead.");
-    }
-  }
   async function verify(application: Application) {
     const res = await api("/api/passid/connect/sessions", { method: "POST", body: JSON.stringify({ application_id: application.id }) }, auth.csrf);
     const body = await res.json();
@@ -448,21 +397,7 @@ function Verification({ auth }: { auth: any }) {
   return <section className="page"><PageTitle title="PASSID verification" subtitle="Review consent categories, open hosted PASSID Connect, and track access." />
     {params.get("result") && <div className="notice">PASSID callback result: {params.get("result")}</div>}
     {message && <div className="notice">{message}</div>}
-    <div className="wallet-panel">
-      <div>
-        <span className="eyebrow"><QrCode size={15} /> Institution QR</span>
-        <h2>Verify from your wallet</h2>
-        <p>Scan the QR shown by an institution, or paste the request link/code to continue from this wallet session.</p>
-        {scannerStatus && <div className="notice">{scannerStatus}</div>}
-        <video ref={videoRef} className="qr-video" muted playsInline />
-      </div>
-      <div className="wallet-actions">
-        <button className="button" type="button" onClick={startScanner}><ScanLine size={18} /> Scan QR</button>
-        <button className="button secondary" type="button" onClick={stopScanner}>Stop camera</button>
-        <input value={qrValue} onChange={(e) => setQrValue(e.target.value)} placeholder="Paste institution QR link or code" />
-        <button className="button secondary" type="button" onClick={() => openInstitutionRequest()}><ExternalLink size={18} /> Continue</button>
-      </div>
-    </div>
+    <div className="notice">Start verification from a CareerBridge application below. Sign-in, account creation, identity checks, and consent happen only on PassID's hosted authorization page.</div>
     {walletSession && <div className="wallet-panel">
       <div>
         <span className="eyebrow"><Smartphone size={15} /> PASSID Wallet</span>

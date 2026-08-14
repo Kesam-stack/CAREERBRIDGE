@@ -52,7 +52,7 @@ careerbridge/
 
 1. Candidate applies to a job.
 2. CareerBridge maps job verification requirements to approved PASSID scopes.
-3. CareerBridge backend creates a PASSID Connect session using `PASSID_SECRET_KEY`.
+3. CareerBridge backend creates a PASSID Connect session using `PASSID_CONNECT_KEY`.
 4. Candidate opens the hosted PASSID authorization URL.
 5. PASSID redirects to `PASSID_REDIRECT_URL` with `state`.
 6. CareerBridge validates server-side state and retrieves the session from PASSID.
@@ -66,9 +66,8 @@ careerbridge/
 Set real values in Railway. Do not commit secrets.
 
 ```env
-PASSID_API_BASE_URL=https://api.passid.io/api/sandbox/connect
-PASSID_SECRET_KEY=
-PASSID_PUBLISHABLE_KEY=
+PASSID_CONNECT_BASE=https://api.passid.io/api/sandbox/connect
+PASSID_CONNECT_KEY=
 PASSID_WEBHOOK_SECRET=
 PASSID_ENVIRONMENT=sandbox
 PASSID_REDIRECT_URL=
@@ -80,7 +79,26 @@ SESSION_SECRET=
 ENCRYPTION_KEY=
 ```
 
-For approved live access, set `PASSID_API_BASE_URL=https://api.passid.io/v1/connect`. `PASSID_ENVIRONMENT=live` rejects `sk_test_` and `pk_test_` keys, and sandbox mode rejects live keys or the production Connect URL.
+For approved live access, set `PASSID_CONNECT_BASE=https://api.passid.io/v1/connect`. `PASSID_ENVIRONMENT=live` rejects `sk_test_` keys, and sandbox mode rejects live keys or the production Connect URL. The older `PASSID_API_BASE_URL` and `PASSID_SECRET_KEY` names remain supported during migration.
+
+PASSID derives your registered institution from `PASSID_CONNECT_KEY`; do not send or hard-code an institution ID. Public CareerBridge signup creates candidate or pending employer accounts only. Institution workspace access remains in PASSID's institution portal.
+
+After adding the registered institution's sandbox key, verify it without printing the key:
+
+```bash
+bun run passid:check
+```
+
+A successful check returns `{"ok":true,...}`. You can also use the admin-only `GET /api/admin/passid/readiness` endpoint from the deployed app.
+
+In the PASSID institution dashboard, finish the external setup before an end-to-end test:
+
+1. Create a sandbox Connect key and save it as `PASSID_CONNECT_KEY` in Railway.
+2. Register `PASSID_REDIRECT_URL` as an allowed Connect return URL.
+3. Register `PASSID_WEBHOOK_URL` under Webhooks and copy its signing secret to `PASSID_WEBHOOK_SECRET`.
+4. Run `bun run passid:check`, then complete a hosted sandbox flow with both the success and partial-consent test users.
+
+Do not use the PASSID partner code, institution portal password, or a user PassID code as `PASSID_CONNECT_KEY`.
 
 ## Local Development
 

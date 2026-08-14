@@ -121,7 +121,7 @@ export function createCareerBridgeApp(options: AppOptions = {}) {
     c.header("X-Content-Type-Options", "nosniff");
     c.header("X-Frame-Options", "DENY");
     c.header("Referrer-Policy", "strict-origin-when-cross-origin");
-    c.header("Permissions-Policy", "camera=(self), microphone=(), geolocation=()");
+    c.header("Permissions-Policy", "camera=(), microphone=(), geolocation=()");
     await next();
   });
 
@@ -164,7 +164,6 @@ export function createCareerBridgeApp(options: AppOptions = {}) {
   app.get("/api/config", (c) => c.json({
     service: "careerbridge",
     passidEnvironment: env.PASSID_ENVIRONMENT,
-    passidPublishableKey: env.PASSID_PUBLISHABLE_KEY,
     approvedScopes: APPROVED_SCOPES,
   }));
   app.get("/api/admin/environment", async (c) => {
@@ -174,18 +173,36 @@ export function createCareerBridgeApp(options: AppOptions = {}) {
   });
 
   app.post("/api/auth/signup", async (c) => {
-    const body = z.object({ email: z.string().email(), password: z.string().min(10), name: z.string().min(2), role: z.enum(["candidate", "employer", "university"]) }).parse(await c.req.json());
+    const parsed = z.object({
+      email: z.string().trim().email().max(254),
+      password: z.string().min(12).max(128)
+        .regex(/[a-z]/, "password_requires_lowercase")
+        .regex(/[A-Z]/, "password_requires_uppercase")
+        .regex(/[0-9]/, "password_requires_number"),
+      name: z.string().trim().min(2).max(100),
+      role: z.enum(["candidate", "employer"]),
+      organization_name: z.string().trim().min(2).max(160).optional(),
+      website: z.string().trim().url().max(300).optional().or(z.literal("")),
+      accepted_terms: z.literal(true),
+    }).safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) return c.json({ error: "invalid_signup", fields: parsed.error.flatten().fieldErrors }, 400);
+    const body = parsed.data;
+    if (body.role === "employer" && !body.organization_name) {
+      return c.json({ error: "organization_name_required" }, 400);
+    }
     const id = randomId("usr");
     try {
-      db.prepare("INSERT INTO users (id,email,password_hash,role,name,email_verified,created_at) VALUES (?,?,?,?,?,0,?)")
-        .run(id, body.email.toLowerCase(), hashPassword(body.password), body.role, body.name, now());
-      if (body.role === "candidate") db.prepare("INSERT INTO candidate_profiles (user_id) VALUES (?)").run(id);
-      if (body.role === "employer" || body.role === "university") {
-        db.prepare("INSERT INTO organizations (id,owner_user_id,name,type,status,created_at) VALUES (?,?,?,?,?,?)")
-          .run(randomId("org"), id, `${body.name}'s organization`, body.role === "university" ? "university" : "employer", "pending", now());
-      }
+      db.transaction(() => {
+        db.prepare("INSERT INTO users (id,email,password_hash,role,name,email_verified,created_at) VALUES (?,?,?,?,?,0,?)")
+          .run(id, body.email.toLowerCase(), hashPassword(body.password), body.role, body.name, now());
+        if (body.role === "candidate") db.prepare("INSERT INTO candidate_profiles (user_id) VALUES (?)").run(id);
+        if (body.role === "employer") {
+          db.prepare("INSERT INTO organizations (id,owner_user_id,name,type,status,website,created_at) VALUES (?,?,?,?,?,?,?)")
+            .run(randomId("org"), id, body.organization_name!, "employer", "pending", body.website || null, now());
+        }
+      })();
       const { csrf } = createUserSession(c, { id, email: body.email.toLowerCase(), role: body.role, name: body.name });
-      audit(db, id, "user.signup", "user", id, { role: body.role });
+      audit(db, id, "user.signup", "user", id, { role: body.role, terms_accepted: true });
       return c.json({ user: { id, email: body.email.toLowerCase(), role: body.role, name: body.name }, csrf }, 201);
     } catch {
       return c.json({ error: "email_unavailable" }, 409);
@@ -195,7 +212,7 @@ export function createCareerBridgeApp(options: AppOptions = {}) {
   app.post("/api/auth/login", async (c) => {
     const body = z.object({ email: z.string().email(), password: z.string().min(1) }).parse(await c.req.json());
     const user = db.prepare("SELECT id,email,password_hash,role,name,suspended_at FROM users WHERE email = ?").get(body.email.toLowerCase()) as any;
-    const demoOk = user?.password_hash === "pbkdf2$demo$demo" && body.password === "CareerBridgeDemo!2026";
+    const demoOk = env.NODE_ENV !== "production" && user?.password_hash === "pbkdf2$demo$demo" && body.password === "CareerBridgeDemo!2026";
     if (!user || user.suspended_at || (!demoOk && !verifyPassword(body.password, user.password_hash))) {
       return c.json({ error: "invalid_credentials" }, 401);
     }
@@ -612,6 +629,22 @@ export function createCareerBridgeApp(options: AppOptions = {}) {
     `).all();
     const events = db.prepare("SELECT id,type,passid_connection_id,processed_at,payload_summary FROM passid_webhook_events ORDER BY processed_at DESC LIMIT 50").all();
     return c.json({ environment: env.PASSID_ENVIRONMENT, connections, events });
+  });
+
+  app.get("/api/admin/passid/readiness", async (c) => {
+    const user = await requireUser(c, ["admin"]);
+    if (user instanceof Response) return user;
+    try {
+      const result = await passid.checkConnection();
+      return c.json({ ok: result.active, environment: result.environment ?? env.PASSID_ENVIRONMENT, request_id: result.request_id ?? null });
+    } catch (error) {
+      return c.json({
+        ok: false,
+        environment: env.PASSID_ENVIRONMENT,
+        error: (error as any)?.status === 401 ? "invalid_or_inactive_connect_key" : "passid_unreachable",
+        request_id: (error as any)?.requestId ?? null,
+      }, 502);
+    }
   });
 
   app.get("*", serveCareerBridgeWeb);

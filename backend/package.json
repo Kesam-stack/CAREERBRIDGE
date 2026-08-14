@@ -5,6 +5,7 @@
   "scripts": {
     "dev": "bun --hot src/index.ts",
     "start": "bun run src/index.ts",
+    "passid:check": "bun run src/passid-check.ts",
     "test": "bun test",
     "typecheck": "tsc --noEmit"
   },

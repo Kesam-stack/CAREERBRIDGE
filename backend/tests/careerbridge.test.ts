@@ -25,6 +25,9 @@ const baseEnv: CareerBridgeEnv = {
 
 function mockPassid(): PassidClient {
   return {
+    async checkConnection() {
+      return { active: true, environment: "sandbox", request_id: "req_key_test" };
+    },
     async createSession(input) {
       expect(input.scopes).toContain("identity.read");
       expect(input.scopes).toContain("income.read");
@@ -56,6 +59,9 @@ function mockPassid(): PassidClient {
 
 function mockRateLimitedPassid(): PassidClient {
   return {
+    async checkConnection() {
+      throw new Error("not used");
+    },
     async createSession() {
       const err = new Error("PASSID_SESSION_CREATE_FAILED:PASSID_API_429:status=429:retry_after=60s");
       (err as any).status = 429;
@@ -127,6 +133,18 @@ describe("CareerBridge independent PASSID institution app", () => {
     const body = await version.json() as any;
     expect(body.service).toBe("careerbridge");
     expect(JSON.stringify(body)).not.toContain("sk_test");
+
+    const config = await app.request("/api/config");
+    expect(JSON.stringify(await config.json())).not.toContain("pk_test");
+  });
+
+  it("checks the registered PassID institution key only for admins", async () => {
+    const anonymous = await app.request("/api/admin/passid/readiness");
+    expect(anonymous.status).toBe(401);
+    const admin = await login(app, "admin@careerbridge.test", "admin");
+    const readiness = await app.request("/api/admin/passid/readiness", { headers: { Cookie: admin.cookie } });
+    expect(readiness.status).toBe(200);
+    expect(await readiness.json()).toEqual({ ok: true, environment: "sandbox", request_id: "req_key_test" });
   });
 
   it("signs up a new user, returns a session, and logs out cleanly", async () => {
@@ -139,6 +157,7 @@ describe("CareerBridge independent PASSID institution app", () => {
         email,
         password: "CareerBridgeDemo!2026",
         role: "candidate",
+        accepted_terms: true,
       }),
     });
 
@@ -191,6 +210,16 @@ describe("CareerBridge independent PASSID institution app", () => {
     });
     expect(legacyVerify.status).toBe(404);
     expect(db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='auth_otps'").get()).toBeNull();
+  });
+
+  it("never accepts development demo passwords in production", async () => {
+    const productionApp = createCareerBridgeApp({ env: { ...baseEnv, NODE_ENV: "production" }, db, passidClient: mockPassid() }).app;
+    const response = await productionApp.request("/api/auth/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: "amara@careerbridge.test", password: "CareerBridgeDemo!2026" }),
+    });
+    expect(response.status).toBe(401);
   });
 
   it("allows candidates to apply and creates a server-side PASSID session without leaking secrets", async () => {
@@ -370,7 +399,7 @@ describe("CareerBridge independent PASSID institution app", () => {
     const otherSignup = await app.request("/api/auth/signup", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ email: "other@careerbridge.test", password: "A-valid-password-2026", name: "Other Recruiter", role: "employer" }),
+      body: JSON.stringify({ email: "other@careerbridge.test", password: "A-valid-password-2026", name: "Other Recruiter", role: "employer", organization_name: "Other Company", accepted_terms: true }),
     });
     expect(otherSignup.status).toBe(201);
     db.prepare("UPDATE users SET password_hash='pbkdf2$demo$demo' WHERE email='other@careerbridge.test'").run();
@@ -441,6 +470,7 @@ describe("CareerBridge independent PASSID institution app", () => {
         password: "A-valid-password-2026",
         name: "New Candidate",
         role: "candidate",
+        accepted_terms: true,
       }),
     });
 
@@ -465,6 +495,30 @@ describe("CareerBridge independent PASSID institution app", () => {
     expect(profile.status).toBe(200);
     const profileBody = await profile.json() as any;
     expect(profileBody.profile.user_id).toBe(body.user.id);
+  });
+
+  it("requires real registration consent and keeps institution accounts out of public signup", async () => {
+    const missingConsent = await app.request("/api/auth/signup", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: "no.consent@example.com", password: "ValidPassword2026", name: "No Consent", role: "candidate" }),
+    });
+    expect(missingConsent.status).toBe(400);
+
+    const institution = await app.request("/api/auth/signup", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: "admin@university.example", password: "ValidPassword2026", name: "University Admin", role: "university", accepted_terms: true }),
+    });
+    expect(institution.status).toBe(400);
+
+    const employerWithoutOrganization = await app.request("/api/auth/signup", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: "recruiter@newco.example", password: "ValidPassword2026", name: "New Recruiter", role: "employer", accepted_terms: true }),
+    });
+    expect(employerWithoutOrganization.status).toBe(400);
+    expect((await employerWithoutOrganization.json() as any).error).toBe("organization_name_required");
   });
 
   it("lets employers post a published job and see it in their job list", async () => {
@@ -517,6 +571,9 @@ describe("PASSID HTTP client contract", () => {
           },
         }), { status: 201, headers: { "Content-Type": "application/json" } });
       }
+      if (url.endsWith("/keys")) {
+        return Response.json({ data: { active: true, environment: "sandbox" } }, { headers: { "x-request-id": "req_key_contract" } });
+      }
       if (url.endsWith("/sessions/pcs_sandbox_contract")) {
         return Response.json({
           data: {
@@ -535,6 +592,7 @@ describe("PASSID HTTP client contract", () => {
 
     try {
       const client = createPassidClient(baseEnv);
+      const readiness = await client.checkConnection();
       await client.createSession({
         scopes: ["identity.read"],
         purpose: "CareerBridge contract test",
@@ -544,9 +602,10 @@ describe("PASSID HTTP client contract", () => {
       });
       const result = await client.retrieveSession("pcs_sandbox_contract");
 
-      expect(calls[0]?.url).toBe("https://api.passid.io/api/sandbox/connect/sessions");
-      expect(new Headers(calls[0]?.init?.headers).get("Idempotency-Key")).toBe("cbsess_contract");
-      const requestBody = JSON.parse(String(calls[0]?.init?.body));
+      expect(readiness).toEqual({ active: true, environment: "sandbox", request_id: "req_key_contract" });
+      expect(calls[1]?.url).toBe("https://api.passid.io/api/sandbox/connect/sessions");
+      expect(new Headers(calls[1]?.init?.headers).get("Idempotency-Key")).toBe("cbsess_contract");
+      const requestBody = JSON.parse(String(calls[1]?.init?.body));
       expect(requestBody.access_duration).toBe("90days");
       expect(requestBody.state).toBeUndefined();
       expect(result.connection_id).toBe("conn_sandbox_contract");
