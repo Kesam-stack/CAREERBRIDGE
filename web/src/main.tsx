@@ -58,6 +58,27 @@ function titleCase(value: string) {
     .join(" ");
 }
 
+function authErrorMessage(body: any, fallback: string) {
+  const known: Record<string, string> = {
+    email_unavailable: "An account already exists with this email. Log in or use another email address.",
+    organization_name_required: "Enter your registered organization name.",
+    invalid_credentials: "The email or password is incorrect. If you do not have an account yet, create one first.",
+    invalid_login: "Enter a valid email address and password.",
+  };
+  if (known[body?.error]) return known[body.error];
+  const fieldMessages = Object.values(body?.fields ?? {}).flat().map(String);
+  const validationMessages = fieldMessages.map((message) => {
+    if (message.includes("at least 12")) return "Password must be at least 12 characters.";
+    if (message === "password_requires_lowercase") return "Password must contain a lowercase letter.";
+    if (message === "password_requires_uppercase") return "Password must contain an uppercase letter.";
+    if (message === "password_requires_number") return "Password must contain a number.";
+    if (message.includes("Invalid email")) return "Enter a valid email address.";
+    if (message.includes("Invalid input: expected true")) return "Confirm the account-creation consent checkbox.";
+    return message;
+  });
+  return validationMessages[0] ?? body?.message ?? fallback;
+}
+
 function App() {
   const [user, setUser] = useState<User | null>(null);
   const [csrf, setCsrf] = useState("");
@@ -222,7 +243,7 @@ function Login({ auth }: { auth: any }) {
     setError("");
     const res = await api("/api/auth/login", { method: "POST", body: JSON.stringify({ email, password }) });
     const body = await res.json();
-    if (!res.ok) return setError(body.error ?? "Login failed");
+    if (!res.ok) return setError(authErrorMessage(body, "Login failed. Please try again."));
     auth.setUser(body.user); auth.setCsrf(body.csrf);
     navigate(body.user.role === "employer" ? "/employer/dashboard" : body.user.role === "admin" ? "/admin/passid" : "/dashboard");
   }
@@ -240,9 +261,10 @@ function Signup({ auth, forcedRole }: { auth: any; forcedRole?: string }) {
   const [error, setError] = useState("");
   async function submit(e: React.FormEvent) {
     e.preventDefault();
+    setError("");
     const res = await api("/api/auth/signup", { method: "POST", body: JSON.stringify(form) });
     const body = await res.json();
-    if (!res.ok) return setError(body.error ?? "Signup failed");
+    if (!res.ok) return setError(authErrorMessage(body, "Signup failed. Check the form and try again."));
     auth.setUser(body.user);
     auth.setCsrf(body.csrf ?? "");
     navigate(body.user.role === "employer" ? "/employer/dashboard" : body.user.role === "admin" ? "/admin/passid" : "/dashboard");

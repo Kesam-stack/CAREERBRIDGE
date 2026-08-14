@@ -184,6 +184,14 @@ describe("CareerBridge independent PASSID institution app", () => {
   });
 
   it("logs in directly and rejects invalid credentials", async () => {
+    const malformed = await app.request("/api/auth/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: "not-an-email", password: "anything" }),
+    });
+    expect(malformed.status).toBe(400);
+    expect((await malformed.json() as any).error).toBe("invalid_login");
+
     const bad = await app.request("/api/auth/login", {
       method: "POST",
       headers: { "Content-Type": "application/json" },

@@ -210,7 +210,10 @@ export function createCareerBridgeApp(options: AppOptions = {}) {
   });
 
   app.post("/api/auth/login", async (c) => {
-    const body = z.object({ email: z.string().email(), password: z.string().min(1) }).parse(await c.req.json());
+    const parsed = z.object({ email: z.string().trim().email(), password: z.string().min(1) })
+      .safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) return c.json({ error: "invalid_login", message: "Enter a valid email address and password." }, 400);
+    const body = parsed.data;
     const user = db.prepare("SELECT id,email,password_hash,role,name,suspended_at FROM users WHERE email = ?").get(body.email.toLowerCase()) as any;
     const demoOk = env.NODE_ENV !== "production" && user?.password_hash === "pbkdf2$demo$demo" && body.password === "CareerBridgeDemo!2026";
     if (!user || user.suspended_at || (!demoOk && !verifyPassword(body.password, user.password_hash))) {
