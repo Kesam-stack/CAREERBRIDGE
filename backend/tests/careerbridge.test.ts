@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it } from "bun:test";
 import { Database } from "bun:sqlite";
+import { createHash } from "crypto";
 import { createCareerBridgeApp } from "../src/app";
 import { migrate, seed } from "../src/db";
 import type { CareerBridgeEnv } from "../src/env";
@@ -29,6 +30,7 @@ describe("PKCE secret handling", () => {
     expect(pair.verifier.length).toBeGreaterThanOrEqual(43);
     expect(pair.verifier.length).toBeLessThanOrEqual(128);
     expect(pair.challenge).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(createHash("sha256").update(pair.verifier).digest("base64url")).toBe(pair.challenge);
     const encrypted = encryptSecret(pair.verifier, baseEnv.ENCRYPTION_KEY);
     expect(encrypted).not.toContain(pair.verifier);
     expect(decryptSecret(encrypted, baseEnv.ENCRYPTION_KEY)).toBe(pair.verifier);
