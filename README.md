@@ -52,14 +52,14 @@ careerbridge/
 
 1. Candidate applies to a job.
 2. CareerBridge maps job verification requirements to approved PASSID scopes.
-3. CareerBridge backend creates a PASSID Connect session using `PASSID_CONNECT_KEY`.
+3. CareerBridge generates a PKCE verifier/challenge, encrypts the verifier server-side, and creates a PASSID Connect session using `PASSID_CONNECT_KEY`.
 4. Candidate opens the hosted PASSID authorization URL.
-5. PASSID redirects to `PASSID_REDIRECT_URL` with `state`.
-6. CareerBridge validates server-side state and retrieves the session from PASSID.
-7. CareerBridge stores status-oriented verification results only.
-8. Employer sees permitted verification status.
-9. Candidate can revoke access.
-10. Webhooks update connection and consent state.
+5. PASSID redirects to `PASSID_REDIRECT_URL` with a one-time authorization `code` and the original `state`.
+6. CareerBridge validates `state` and exchanges the code plus PKCE verifier at `POST /v1/connect/token`.
+7. Only after that exchange succeeds does CareerBridge fetch granted scopes and clear the stored verifier.
+8. CareerBridge stores status-oriented verification results only.
+9. Employer sees permitted verification status.
+10. Candidate can revoke access, and webhooks update connection lifecycle state.
 
 ## Railway Variables
 
@@ -123,9 +123,10 @@ Password: `CareerBridgeDemo!2026`
 - Role-based access checks
 - Scope allowlist enforcement
 - PASSID callback state hashing and one-time use
+- S256 PKCE on Connect sessions, with AES-256-GCM encrypted verifier storage and one-time cleanup
 - Webhook raw-body HMAC verification and event-ID replay protection
-- Idempotency keys on hosted-session creation
-- Server-side callback session verification and partial-consent handling
+- Idempotency keys on hosted-session creation and authorization-code exchange
+- Server-side authorization-code exchange and partial-consent handling
 - Sanitized admin views and audit logs
 - No PASSID secret key in frontend responses
 # CAREERBRIDGE

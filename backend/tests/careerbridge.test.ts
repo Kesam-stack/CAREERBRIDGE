@@ -3,7 +3,7 @@ import { Database } from "bun:sqlite";
 import { createCareerBridgeApp } from "../src/app";
 import { migrate, seed } from "../src/db";
 import type { CareerBridgeEnv } from "../src/env";
-import { hmac, randomId } from "../src/security";
+import { createPkcePair, decryptSecret, encryptSecret, hmac, randomId } from "../src/security";
 import { createPassidClient, type PassidClient } from "../src/passid";
 
 const baseEnv: CareerBridgeEnv = {
@@ -22,6 +22,18 @@ const baseEnv: CareerBridgeEnv = {
   PASSID_REDIRECT_URL: "https://api.careerbridge.test/api/passid/callback",
   PASSID_WEBHOOK_URL: "https://api.careerbridge.test/api/webhooks/passid",
 };
+
+describe("PKCE secret handling", () => {
+  it("creates an S256-compatible pair and encrypts the verifier at rest", () => {
+    const pair = createPkcePair();
+    expect(pair.verifier.length).toBeGreaterThanOrEqual(43);
+    expect(pair.verifier.length).toBeLessThanOrEqual(128);
+    expect(pair.challenge).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    const encrypted = encryptSecret(pair.verifier, baseEnv.ENCRYPTION_KEY);
+    expect(encrypted).not.toContain(pair.verifier);
+    expect(decryptSecret(encrypted, baseEnv.ENCRYPTION_KEY)).toBe(pair.verifier);
+  });
+});
 
 function mockPassid(): PassidClient {
   return {
