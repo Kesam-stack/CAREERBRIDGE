@@ -1,7 +1,32 @@
-import { createHmac, pbkdf2Sync, randomBytes, timingSafeEqual } from "crypto";
+import { createCipheriv, createDecipheriv, createHash, createHmac, pbkdf2Sync, randomBytes, timingSafeEqual } from "crypto";
 
 export function randomId(prefix: string): string {
   return `${prefix}_${randomBytes(18).toString("hex")}`;
+}
+
+export function createPkcePair(): { verifier: string; challenge: string } {
+  const verifier = randomBytes(48).toString("base64url");
+  const challenge = createHash("sha256").update(verifier).digest("base64url");
+  return { verifier, challenge };
+}
+
+function encryptionKey(secret: string): Buffer {
+  return createHash("sha256").update(secret).digest();
+}
+
+export function encryptSecret(value: string, secret: string): string {
+  const iv = randomBytes(12);
+  const cipher = createCipheriv("aes-256-gcm", encryptionKey(secret), iv);
+  const ciphertext = Buffer.concat([cipher.update(value, "utf8"), cipher.final()]);
+  return ["v1", iv.toString("base64url"), cipher.getAuthTag().toString("base64url"), ciphertext.toString("base64url")].join(".");
+}
+
+export function decryptSecret(value: string, secret: string): string {
+  const [version, iv, tag, ciphertext] = value.split(".");
+  if (version !== "v1" || !iv || !tag || !ciphertext) throw new Error("INVALID_ENCRYPTED_SECRET");
+  const decipher = createDecipheriv("aes-256-gcm", encryptionKey(secret), Buffer.from(iv, "base64url"));
+  decipher.setAuthTag(Buffer.from(tag, "base64url"));
+  return Buffer.concat([decipher.update(Buffer.from(ciphertext, "base64url")), decipher.final()]).toString("utf8");
 }
 
 export function hashPassword(password: string): string {

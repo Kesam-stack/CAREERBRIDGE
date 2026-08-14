@@ -8,7 +8,7 @@ import { join, normalize, extname } from "path";
 import { openCareerBridgeDb, type Role } from "./db";
 import { getEnvironmentIssues, loadEnv, safeVersion, type CareerBridgeEnv } from "./env";
 import { createPassidClient, type PassidClient } from "./passid";
-import { hashPassword, hmac, randomId, safeEqual, sanitizeScopes, verifyPassword } from "./security";
+import { createPkcePair, decryptSecret, encryptSecret, hashPassword, hmac, randomId, safeEqual, sanitizeScopes, verifyPassword } from "./security";
 
 const APPROVED_SCOPES = [
   "identity.read",
@@ -43,12 +43,6 @@ function jsonArray(value: unknown): string[] {
 
 function now() {
   return Date.now();
-}
-
-function passidReturnUrl(baseUrl: string, state: string): string {
-  const url = new URL(baseUrl);
-  url.searchParams.set("state", state);
-  return url.toString();
 }
 
 function isSafePassidHostedUrl(value: string): boolean {
@@ -411,17 +405,21 @@ export function createCareerBridgeApp(options: AppOptions = {}) {
     }
 
     const state = randomId("state");
+    const pkce = createPkcePair();
     const sessionRecordId = randomId("cbsess");
     const expiresAt = now() + 1000 * 60 * 15;
-    db.prepare("INSERT INTO passid_sessions (id,application_id,candidate_user_id,state_hash,status,scopes,purpose,environment,expires_at,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)")
-      .run(sessionRecordId, appRow.id, user.id, hmac(state, env.SESSION_SECRET), "creating", JSON.stringify(scopes), `CareerBridge application: ${appRow.title}`, env.PASSID_ENVIRONMENT, expiresAt, now());
+    db.prepare("INSERT INTO passid_sessions (id,application_id,candidate_user_id,state_hash,pkce_verifier_ciphertext,redirect_uri,status,scopes,purpose,environment,expires_at,created_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)")
+      .run(sessionRecordId, appRow.id, user.id, hmac(state, env.SESSION_SECRET), encryptSecret(pkce.verifier, env.ENCRYPTION_KEY), env.PASSID_REDIRECT_URL, "creating", JSON.stringify(scopes), `CareerBridge application: ${appRow.title}`, env.PASSID_ENVIRONMENT, expiresAt, now());
     try {
       const created = await passid.createSession({
         scopes,
         purpose: `CareerBridge verification for ${appRow.title}`,
-        return_url: passidReturnUrl(env.PASSID_REDIRECT_URL, state),
+        return_url: env.PASSID_REDIRECT_URL,
         application_reference: appRow.id,
         idempotency_key: sessionRecordId,
+        state,
+        code_challenge: pkce.challenge,
+        code_challenge_method: "S256",
         access_duration: "90days",
       });
       if (!isSafePassidHostedUrl(created.hosted_url) || /client_secret|secret=/i.test(created.hosted_url)) {
@@ -477,7 +475,25 @@ export function createCareerBridgeApp(options: AppOptions = {}) {
       return c.redirect(`${env.APP_URL}/verification?result=invalid_state`);
     }
     try {
-      const result = await passid.retrieveSession(row.passid_session_id);
+      const callbackStatus = c.req.query("status") ?? "";
+      if (callbackStatus === "declined") {
+        db.prepare("UPDATE passid_sessions SET used_at=?, status='declined', pkce_verifier_ciphertext=NULL WHERE id=? AND used_at IS NULL").run(now(), row.id);
+        audit(db, row.candidate_user_id, "passid.callback.complete", "application", row.application_id, { status: "declined" });
+        return c.redirect(`${env.APP_URL}/verification?result=declined`);
+      }
+      const code = c.req.query("code") ?? "";
+      const result = code && row.pkce_verifier_ciphertext
+        ? await passid.exchangeCode({
+            session_id: row.passid_session_id,
+            code,
+            redirect_uri: row.redirect_uri ?? env.PASSID_REDIRECT_URL,
+            code_verifier: decryptSecret(row.pkce_verifier_ciphertext, env.ENCRYPTION_KEY),
+            idempotency_key: `${row.id}_token`,
+          })
+        : env.PASSID_ENVIRONMENT === "sandbox"
+          ? await passid.retrieveSession(row.passid_session_id)
+          : null;
+      if (!result) return c.redirect(`${env.APP_URL}/verification?result=missing_code`);
       if (result.session_id !== row.passid_session_id) {
         return c.redirect(`${env.APP_URL}/verification?result=session_mismatch`);
       }
@@ -485,7 +501,7 @@ export function createCareerBridgeApp(options: AppOptions = {}) {
         return c.redirect(`${env.APP_URL}/verification?result=pending`);
       }
       if (result.status !== "approved") {
-        db.prepare("UPDATE passid_sessions SET used_at=?, status=? WHERE id=? AND used_at IS NULL").run(now(), result.status, row.id);
+        db.prepare("UPDATE passid_sessions SET used_at=?, status=?, pkce_verifier_ciphertext=NULL WHERE id=? AND used_at IS NULL").run(now(), result.status, row.id);
         audit(db, row.candidate_user_id, "passid.callback.complete", "application", row.application_id, { status: result.status });
         return c.redirect(`${env.APP_URL}/verification?result=${encodeURIComponent(result.status)}`);
       }
@@ -494,7 +510,7 @@ export function createCareerBridgeApp(options: AppOptions = {}) {
       const requestedScopes = jsonArray(row.scopes);
       const grantedScopes = sanitizeScopes(result.granted_scopes, requestedScopes);
       const committed = db.transaction(() => {
-        const update = db.prepare("UPDATE passid_sessions SET used_at=?, status=? WHERE id=? AND used_at IS NULL").run(now(), result.status, row.id);
+        const update = db.prepare("UPDATE passid_sessions SET used_at=?, status=?, pkce_verifier_ciphertext=NULL WHERE id=? AND used_at IS NULL").run(now(), result.status, row.id);
         if (update.changes !== 1) return false;
         const connectionId = randomId("cbconn");
         db.prepare("INSERT INTO passid_connections (id,application_id,candidate_user_id,passid_session_id,connection_id,status,granted_scopes,consent_status,expires_at,last_api_request_id,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)")

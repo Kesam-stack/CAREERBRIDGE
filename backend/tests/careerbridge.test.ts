@@ -31,12 +31,26 @@ function mockPassid(): PassidClient {
     async createSession(input) {
       expect(input.scopes).toContain("identity.read");
       expect(input.scopes).toContain("income.read");
-      expect(input.return_url).toContain("state=");
+      expect(input.return_url).toBe(baseEnv.PASSID_REDIRECT_URL);
+      expect(input.state).toStartWith("state_");
+      expect(input.code_challenge).toMatch(/^[A-Za-z0-9_-]{43}$/);
+      expect(input.code_challenge_method).toBe("S256");
       return {
         session_id: "pcs_sandbox_test_123",
         hosted_url: "https://passid.io/connect/authorize?env=sandbox&session=pcs_sandbox_test_123",
         status: "pending_customer",
         expires_at: new Date(Date.now() + 900_000).toISOString(),
+      };
+    },
+    async exchangeCode(input) {
+      expect(input.code_verifier.length).toBeGreaterThanOrEqual(43);
+      return {
+        session_id: input.session_id,
+        status: "approved",
+        connection_id: "conn_sandbox_test_123",
+        granted_scopes: ["identity.read", "income.read"],
+        verification: { identity: "verified", income: "verified" },
+        request_id: "req_token_test",
       };
     },
     async retrieveSession(sessionId) {
@@ -69,6 +83,9 @@ function mockRateLimitedPassid(): PassidClient {
       (err as any).retryAfterSeconds = 60;
       (err as any).requestId = "req_passid_rate_limited";
       throw err;
+    },
+    async exchangeCode() {
+      throw new Error("not used");
     },
     async retrieveSession() {
       throw new Error("not used");
@@ -359,6 +376,67 @@ describe("CareerBridge independent PASSID institution app", () => {
     expect(reused.headers.get("location")).toContain("invalid_state");
   });
 
+  it("uses PKCE and exchanges the one-time code before trusting a live callback", async () => {
+    const liveDb = new Database(":memory:");
+    migrate(liveDb);
+    seed(liveDb);
+    let savedState = "";
+    let savedChallenge = "";
+    let exchangeCalled = false;
+    const livePassid: PassidClient = {
+      ...mockPassid(),
+      async createSession(input) {
+        savedState = input.state;
+        savedChallenge = input.code_challenge;
+        expect(input.return_url).toBe(baseEnv.PASSID_REDIRECT_URL);
+        expect(input.code_challenge_method).toBe("S256");
+        return {
+          session_id: "pcs_live_pkce",
+          hosted_url: "https://app.passid.io/connect/authorize?env=live&session=pcs_live_pkce",
+          status: "pending_customer",
+        };
+      },
+      async exchangeCode(input) {
+        exchangeCalled = true;
+        expect(input.code).toBe("one_time_code");
+        expect(input.redirect_uri).toBe(baseEnv.PASSID_REDIRECT_URL);
+        expect(input.code_verifier.length).toBeGreaterThanOrEqual(43);
+        expect(input.code_verifier.length).toBeLessThanOrEqual(128);
+        expect(Buffer.from(input.code_verifier).toString("base64url")).not.toBe(savedChallenge);
+        return {
+          session_id: input.session_id,
+          status: "approved",
+          connection_id: "conn_live_pkce",
+          granted_scopes: ["identity.read", "income.read"],
+          verification: { identity: "verified", income: "verified" },
+          request_id: "req_live_token",
+        };
+      },
+      async retrieveSession() {
+        throw new Error("live callback must use token exchange");
+      },
+    };
+    const created = createCareerBridgeApp({ env: { ...baseEnv, PASSID_ENVIRONMENT: "live" }, db: liveDb, passidClient: livePassid });
+    const auth = await login(created.app, "amara@careerbridge.test");
+    const application = await applyToDemoJob(created.app, auth);
+    const sessionResponse = await created.app.request("/api/passid/connect/sessions", {
+      method: "POST",
+      headers: { Cookie: auth.cookie, "Content-Type": "application/json", "X-CSRF-Token": auth.csrf },
+      body: JSON.stringify({ application_id: application.id }),
+    });
+    expect(sessionResponse.status).toBe(200);
+    const storedBefore = liveDb.prepare("SELECT pkce_verifier_ciphertext, redirect_uri FROM passid_sessions WHERE application_id=?").get(application.id) as any;
+    expect(storedBefore.pkce_verifier_ciphertext).toStartWith("v1.");
+    expect(storedBefore.pkce_verifier_ciphertext).not.toContain(savedChallenge);
+    expect(storedBefore.redirect_uri).toBe(baseEnv.PASSID_REDIRECT_URL);
+
+    const callback = await created.app.request(`/api/passid/callback?state=${encodeURIComponent(savedState)}&code=one_time_code&status=approved&session_id=pcs_live_pkce`, { redirect: "manual" });
+    expect(callback.headers.get("location")).toContain("result=success");
+    expect(exchangeCalled).toBe(true);
+    const storedAfter = liveDb.prepare("SELECT pkce_verifier_ciphertext FROM passid_sessions WHERE application_id=?").get(application.id) as any;
+    expect(storedAfter.pkce_verifier_ciphertext).toBeNull();
+  });
+
   it("keeps an application in verification when PASSID grants only some required scopes", async () => {
     const db = new Database(":memory:");
     migrate(db);
@@ -584,6 +662,9 @@ describe("PASSID HTTP client contract", () => {
       if (url.endsWith("/keys")) {
         return Response.json({ data: { active: true, environment: "sandbox" } }, { headers: { "x-request-id": "req_key_contract" } });
       }
+      if (url.endsWith("/token") && init?.method === "POST") {
+        return Response.json({ data: { connection_id: "conn_sandbox_contract", granted_scopes: ["identity.read"], evidence_result: "verified" } }, { headers: { "x-request-id": "req_token_contract" } });
+      }
       if (url.endsWith("/sessions/pcs_sandbox_contract")) {
         return Response.json({
           data: {
@@ -606,9 +687,19 @@ describe("PASSID HTTP client contract", () => {
       await client.createSession({
         scopes: ["identity.read"],
         purpose: "CareerBridge contract test",
-        return_url: "https://api.careerbridge.test/api/passid/callback?state=safe",
+        return_url: "https://api.careerbridge.test/api/passid/callback",
         application_reference: "app_contract",
         idempotency_key: "cbsess_contract",
+        state: "state_contract",
+        code_challenge: "challenge_contract",
+        code_challenge_method: "S256",
+      });
+      const exchanged = await client.exchangeCode({
+        session_id: "pcs_sandbox_contract",
+        code: "code_contract",
+        redirect_uri: "https://api.careerbridge.test/api/passid/callback",
+        code_verifier: "verifier_contract_abcdefghijklmnopqrstuvwxyz1234567890",
+        idempotency_key: "token_contract",
       });
       const result = await client.retrieveSession("pcs_sandbox_contract");
 
@@ -617,7 +708,18 @@ describe("PASSID HTTP client contract", () => {
       expect(new Headers(calls[1]?.init?.headers).get("Idempotency-Key")).toBe("cbsess_contract");
       const requestBody = JSON.parse(String(calls[1]?.init?.body));
       expect(requestBody.access_duration).toBe("90days");
-      expect(requestBody.state).toBeUndefined();
+      expect(requestBody.state).toBe("state_contract");
+      expect(requestBody.code_challenge).toBe("challenge_contract");
+      expect(requestBody.code_challenge_method).toBe("S256");
+      const tokenCall = calls.find((call) => call.url.endsWith("/token"))!;
+      expect(new Headers(tokenCall.init?.headers).get("Idempotency-Key")).toBe("token_contract");
+      expect(JSON.parse(String(tokenCall.init?.body))).toEqual({
+        grant_type: "authorization_code",
+        code: "code_contract",
+        redirect_uri: "https://api.careerbridge.test/api/passid/callback",
+        code_verifier: "verifier_contract_abcdefghijklmnopqrstuvwxyz1234567890",
+      });
+      expect(exchanged.connection_id).toBe("conn_sandbox_contract");
       expect(result.connection_id).toBe("conn_sandbox_contract");
       expect(result.verification.identity).toBe("verified");
     } finally {

@@ -30,6 +30,9 @@ export interface CreatePassidSessionInput {
   return_url: string;
   application_reference: string;
   idempotency_key: string;
+  state: string;
+  code_challenge: string;
+  code_challenge_method: "S256";
   access_duration?: "90days" | "1year" | "permanent";
 }
 
@@ -53,6 +56,7 @@ export interface PassidConnectionResult {
 export interface PassidClient {
   checkConnection(): Promise<{ active: boolean; environment?: string; request_id?: string }>;
   createSession(input: CreatePassidSessionInput): Promise<PassidSession>;
+  exchangeCode(input: { session_id: string; code: string; redirect_uri: string; code_verifier: string; idempotency_key: string }): Promise<PassidConnectionResult>;
   retrieveSession(sessionId: string): Promise<PassidConnectionResult>;
   revokeConnection(connectionId: string): Promise<{ status: string }>;
 }
@@ -123,6 +127,36 @@ export function createPassidClient(env: CareerBridgeEnv): PassidClient {
     return { body: normalizeBody(body), requestId };
   }
 
+  async function fetchVerification(connectionIdValue: string, grantedScopes: string[]): Promise<Record<string, string>> {
+    const verification: Record<string, string> = {};
+    const connectionId = encodeURIComponent(connectionIdValue);
+    const endpointForScope: Record<string, { path: string; key: string; objectKey?: string }> = {
+      "identity.read": { path: "identity", key: "identity", objectKey: "identity" },
+      "income.read": { path: "income", key: "income", objectKey: "income" },
+      "accounts.read": { path: "accounts", key: "account_ownership", objectKey: "accounts" },
+      "verification_status.read": { path: "verification-status", key: "verification_status" },
+    };
+    await Promise.all(grantedScopes.map(async (scope) => {
+      const endpoint = endpointForScope[scope];
+      if (!endpoint) return;
+      try {
+        const { body: endpointBody } = await request(`/connections/${connectionId}/${endpoint.path}`);
+        const value = endpoint.objectKey ? endpointBody?.[endpoint.objectKey] : endpointBody;
+        const explicitStatus = value?.verification_status ?? value?.status ?? endpointBody?.verification_status ?? endpointBody?.status;
+        const explicitVerified = value?.verified ?? endpointBody?.verified;
+        verification[endpoint.key] = typeof explicitStatus === "string"
+          ? explicitStatus
+          : typeof explicitVerified === "boolean"
+            ? (explicitVerified ? "verified" : "not_verified")
+            : "available";
+      } catch (error) {
+        console.warn("[passid data endpoint unavailable]", { scope, status: (error as any)?.status, requestId: (error as any)?.requestId });
+        verification[endpoint.key] = "unavailable";
+      }
+    }));
+    return verification;
+  }
+
   return {
     async checkConnection() {
       const { body, requestId } = await request("/keys");
@@ -143,6 +177,9 @@ export function createPassidClient(env: CareerBridgeEnv): PassidClient {
             return_url: input.return_url,
             application_reference: input.application_reference,
             access_duration: input.access_duration ?? "90days",
+            state: input.state,
+            code_challenge: input.code_challenge,
+            code_challenge_method: input.code_challenge_method,
           }),
         });
         if (!body?.session_id || !body?.hosted_url) throw new Error("PASSID_INVALID_SESSION_RESPONSE");
@@ -161,44 +198,44 @@ export function createPassidClient(env: CareerBridgeEnv): PassidClient {
         throw wrapped;
       }
     },
+    async exchangeCode(input) {
+      try {
+        const { body, requestId } = await request("/token", {
+          method: "POST",
+          headers: { "Idempotency-Key": input.idempotency_key },
+          body: JSON.stringify({
+            grant_type: "authorization_code",
+            code: input.code,
+            redirect_uri: input.redirect_uri,
+            code_verifier: input.code_verifier,
+          }),
+        });
+        if (!body?.connection_id) throw new Error("PASSID_INVALID_TOKEN_RESPONSE");
+        const grantedScopes = Array.isArray(body.granted_scopes) ? body.granted_scopes.map(String) : [];
+        return {
+          session_id: input.session_id,
+          status: "approved",
+          connection_id: String(body.connection_id),
+          granted_scopes: grantedScopes,
+          verification: await fetchVerification(String(body.connection_id), grantedScopes),
+          expires_at: body.expires_at,
+          request_id: requestId,
+        };
+      } catch (error) {
+        const wrapped = new Error(`PASSID_TOKEN_EXCHANGE_FAILED:${redactError(error)}`);
+        (wrapped as any).status = (error as any)?.status;
+        (wrapped as any).requestId = (error as any)?.requestId;
+        (wrapped as any).body = (error as any)?.body;
+        throw wrapped;
+      }
+    },
     async retrieveSession(sessionId) {
       try {
         const { body, requestId } = await request(`/sessions/${encodeURIComponent(sessionId)}`);
         const grantedScopes = Array.isArray(body.granted_scopes) ? body.granted_scopes.map(String) : [];
-        const verification: Record<string, string> = {};
-
-        if (body.status === "approved" && body.connection_id) {
-          const connectionId = encodeURIComponent(String(body.connection_id));
-          const endpointForScope: Record<string, { path: string; key: string; objectKey?: string }> = {
-            "identity.read": { path: "identity", key: "identity", objectKey: "identity" },
-            "income.read": { path: "income", key: "income", objectKey: "income" },
-            "accounts.read": { path: "accounts", key: "account_ownership", objectKey: "accounts" },
-            "verification_status.read": { path: "verification-status", key: "verification_status" },
-          };
-
-          await Promise.all(grantedScopes.map(async (scope: string) => {
-            const endpoint = endpointForScope[scope];
-            if (!endpoint) return;
-            try {
-              const { body: endpointBody } = await request(`/connections/${connectionId}/${endpoint.path}`);
-              const value = endpoint.objectKey ? endpointBody?.[endpoint.objectKey] : endpointBody;
-              const explicitStatus = value?.verification_status ?? value?.status ?? endpointBody?.verification_status ?? endpointBody?.status;
-              const explicitVerified = value?.verified ?? endpointBody?.verified;
-              verification[endpoint.key] = typeof explicitStatus === "string"
-                ? explicitStatus
-                : typeof explicitVerified === "boolean"
-                  ? (explicitVerified ? "verified" : "not_verified")
-                  : "available";
-            } catch (error) {
-              console.warn("[passid data endpoint unavailable]", {
-                scope,
-                status: (error as any)?.status,
-                requestId: (error as any)?.requestId,
-              });
-              verification[endpoint.key] = "unavailable";
-            }
-          }));
-        }
+        const verification = body.status === "approved" && body.connection_id
+          ? await fetchVerification(String(body.connection_id), grantedScopes)
+          : {};
 
         return {
           session_id: body.session_id ?? sessionId,
