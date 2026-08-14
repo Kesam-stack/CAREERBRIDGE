@@ -181,8 +181,14 @@ export function createCareerBridgeApp(options: AppOptions = {}) {
         .regex(/[0-9]/, "password_requires_number"),
       name: z.string().trim().min(2).max(100),
       role: z.enum(["candidate", "employer"]),
-      organization_name: z.string().trim().min(2).max(160).optional(),
-      website: z.string().trim().url().max(300).optional().or(z.literal("")),
+      organization_name: z.preprocess(
+        (value) => typeof value === "string" && value.trim() === "" ? undefined : value,
+        z.string().trim().min(2).max(160).optional(),
+      ),
+      website: z.preprocess(
+        (value) => typeof value === "string" && value.trim() === "" ? undefined : value,
+        z.string().trim().url().max(300).optional(),
+      ),
       accepted_terms: z.literal(true),
     }).safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) return c.json({ error: "invalid_signup", fields: parsed.error.flatten().fieldErrors }, 400);

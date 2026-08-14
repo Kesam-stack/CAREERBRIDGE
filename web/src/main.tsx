@@ -262,7 +262,10 @@ function Signup({ auth, forcedRole }: { auth: any; forcedRole?: string }) {
   async function submit(e: React.FormEvent) {
     e.preventDefault();
     setError("");
-    const res = await api("/api/auth/signup", { method: "POST", body: JSON.stringify(form) });
+    const payload = form.role === "candidate"
+      ? { name: form.name, email: form.email, password: form.password, role: form.role, accepted_terms: form.accepted_terms }
+      : form;
+    const res = await api("/api/auth/signup", { method: "POST", body: JSON.stringify(payload) });
     const body = await res.json();
     if (!res.ok) return setError(authErrorMessage(body, "Signup failed. Check the form and try again."));
     auth.setUser(body.user);

@@ -157,6 +157,8 @@ describe("CareerBridge independent PASSID institution app", () => {
         email,
         password: "CareerBridgeDemo!2026",
         role: "candidate",
+        organization_name: "",
+        website: "",
         accepted_terms: true,
       }),
     });
