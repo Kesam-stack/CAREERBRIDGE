@@ -51,6 +51,8 @@ export interface PassidConnectionResult {
   verification: Record<string, string>;
   expires_at?: string;
   request_id?: string;
+  institution_subject_id?: string;
+  evidence_result?: string;
 }
 
 export interface PassidClient {
@@ -127,8 +129,29 @@ export function createPassidClient(env: CareerBridgeEnv): PassidClient {
     return { body: normalizeBody(body), requestId };
   }
 
-  async function fetchVerification(connectionIdValue: string, grantedScopes: string[]): Promise<Record<string, string>> {
+  function verificationFromClaims(body: any): Record<string, string> {
+    const claims = body?.claims ?? body?.evidence?.claims ?? {};
     const verification: Record<string, string> = {};
+    const claimStatus = (value: unknown): string | undefined => typeof value === "boolean"
+      ? (value ? "verified" : "not_verified")
+      : typeof value === "string" ? value : undefined;
+    const identity = claimStatus(claims.identity_verified ?? claims.identity?.verified);
+    const income = claimStatus(claims.income_verified ?? claims.income?.verified);
+    const ownership = claimStatus(claims.account_ownership_verified ?? claims.account_ownership?.verified);
+    const status = claimStatus(claims.verification_status ?? claims.identity?.verification_status);
+    if (identity) verification.identity = identity;
+    if (income) verification.income = income;
+    if (ownership) verification.account_ownership = ownership;
+    if (status) verification.verification_status = status;
+    return verification;
+  }
+
+  async function fetchVerification(connectionIdValue: string, grantedScopes: string[], initialBody?: any): Promise<{ verification: Record<string, string>; institutionSubjectId?: string }> {
+    const verification = verificationFromClaims(initialBody);
+    const initialSubject = initialBody?.institution_subject_id
+      ?? initialBody?.subject?.institution_subject_id
+      ?? initialBody?.connection?.institution_subject_id;
+    let institutionSubjectId = initialSubject ? String(initialSubject) : undefined;
     const connectionId = encodeURIComponent(connectionIdValue);
     const endpointForScope: Record<string, { path: string; key: string; objectKey?: string }> = {
       "identity.read": { path: "identity", key: "identity", objectKey: "identity" },
@@ -139,22 +162,31 @@ export function createPassidClient(env: CareerBridgeEnv): PassidClient {
     await Promise.all(grantedScopes.map(async (scope) => {
       const endpoint = endpointForScope[scope];
       if (!endpoint) return;
+      const needsVerification = !verification[endpoint.key];
+      const needsSubject = !institutionSubjectId && scope === "identity.read";
+      if (!needsVerification && !needsSubject) return;
       try {
         const { body: endpointBody } = await request(`/connections/${connectionId}/${endpoint.path}`);
         const value = endpoint.objectKey ? endpointBody?.[endpoint.objectKey] : endpointBody;
+        const endpointSubject = endpointBody?.institution_subject_id
+          ?? endpointBody?.subject?.institution_subject_id
+          ?? value?.institution_subject_id;
+        if (!institutionSubjectId && endpointSubject) institutionSubjectId = String(endpointSubject);
         const explicitStatus = value?.verification_status ?? value?.status ?? endpointBody?.verification_status ?? endpointBody?.status;
         const explicitVerified = value?.verified ?? endpointBody?.verified;
-        verification[endpoint.key] = typeof explicitStatus === "string"
-          ? explicitStatus
-          : typeof explicitVerified === "boolean"
-            ? (explicitVerified ? "verified" : "not_verified")
-            : "available";
+        if (needsVerification) {
+          verification[endpoint.key] = typeof explicitStatus === "string"
+            ? explicitStatus
+            : typeof explicitVerified === "boolean"
+              ? (explicitVerified ? "verified" : "not_verified")
+              : "available";
+        }
       } catch (error) {
         console.warn("[passid data endpoint unavailable]", { scope, status: (error as any)?.status, requestId: (error as any)?.requestId });
         verification[endpoint.key] = "unavailable";
       }
     }));
-    return verification;
+    return { verification, institutionSubjectId };
   }
 
   return {
@@ -212,14 +244,17 @@ export function createPassidClient(env: CareerBridgeEnv): PassidClient {
         });
         if (!body?.connection_id) throw new Error("PASSID_INVALID_TOKEN_RESPONSE");
         const grantedScopes = Array.isArray(body.granted_scopes) ? body.granted_scopes.map(String) : [];
+        const evidence = await fetchVerification(String(body.connection_id), grantedScopes, body);
         return {
           session_id: input.session_id,
           status: "approved",
           connection_id: String(body.connection_id),
           granted_scopes: grantedScopes,
-          verification: await fetchVerification(String(body.connection_id), grantedScopes),
+          verification: evidence.verification,
           expires_at: body.expires_at,
           request_id: requestId,
+          institution_subject_id: evidence.institutionSubjectId,
+          evidence_result: body.evidence_result ? String(body.evidence_result) : undefined,
         };
       } catch (error) {
         const wrapped = new Error(`PASSID_TOKEN_EXCHANGE_FAILED:${redactError(error)}`);
@@ -233,18 +268,20 @@ export function createPassidClient(env: CareerBridgeEnv): PassidClient {
       try {
         const { body, requestId } = await request(`/sessions/${encodeURIComponent(sessionId)}`);
         const grantedScopes = Array.isArray(body.granted_scopes) ? body.granted_scopes.map(String) : [];
-        const verification = body.status === "approved" && body.connection_id
-          ? await fetchVerification(String(body.connection_id), grantedScopes)
-          : {};
+        const evidence = body.status === "approved" && body.connection_id
+          ? await fetchVerification(String(body.connection_id), grantedScopes, body)
+          : { verification: {} as Record<string, string>, institutionSubjectId: undefined };
 
         return {
           session_id: body.session_id ?? sessionId,
           status: body.status ?? "pending",
           connection_id: body.connection_id,
           granted_scopes: grantedScopes,
-          verification,
+          verification: evidence.verification,
           expires_at: body.expires_at,
           request_id: requestId,
+          institution_subject_id: evidence.institutionSubjectId,
+          evidence_result: body.evidence_result ? String(body.evidence_result) : undefined,
         };
       } catch (error) {
         const wrapped = new Error(`PASSID_SESSION_RETRIEVE_FAILED:${redactError(error)}`);

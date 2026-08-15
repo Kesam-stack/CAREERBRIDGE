@@ -57,9 +57,17 @@ careerbridge/
 5. PASSID redirects to `PASSID_REDIRECT_URL` with a one-time authorization `code` and the original `state`.
 6. CareerBridge validates `state` and exchanges the code plus PKCE verifier at `POST /v1/connect/token`.
 7. Only after that exchange succeeds does CareerBridge fetch granted scopes and clear the stored verifier.
-8. CareerBridge stores status-oriented verification results only.
-9. Employer sees permitted verification status.
-10. Candidate can revoke access, and webhooks update connection lifecycle state.
+8. CareerBridge binds PASSID's institution-scoped subject to exactly one CareerBridge candidate account, storing only an HMAC digest of the subject identifier.
+9. CareerBridge stores status-oriented verification results only, and an employer sees only the permitted verification status.
+10. Candidate can revoke access, and signed webhooks reconcile connection lifecycle and identity-binding state.
+
+### Account and reuse policy
+
+- One PASSID person may be bound to only one CareerBridge candidate account. A second account attempting to use the same PASSID subject is placed in `identity_conflict`, and its new PASSID connection is revoked.
+- One CareerBridge account cannot switch to a different PASSID person. This is also treated as `identity_conflict`.
+- The same bound person may authorize PASSID for multiple legitimate job applications. Consent remains application-specific; this is expected reuse, not duplicate-account abuse.
+- Repeated session creation for an application with an active connection is rejected. Pending sessions are reused instead of creating unnecessary upstream sessions.
+- Revoking consent does not erase the account-to-person binding, so revocation cannot be used to switch identities.
 
 ## Railway Variables
 
@@ -97,6 +105,7 @@ In the PASSID institution dashboard, finish the external setup before an end-to-
 2. Register `PASSID_REDIRECT_URL` as an allowed Connect return URL.
 3. Register `PASSID_WEBHOOK_URL` under Webhooks and copy its signing secret to `PASSID_WEBHOOK_SECRET`.
 4. Run `bun run passid:check`, then complete a hosted sandbox flow with both the success and partial-consent test users.
+5. For live use, confirm the enabled Connect package returns `institution_subject_id` and that PASSID's Duplicate Account Risk or Duplicate Worker Risk control is enabled for the institution's use case. CareerBridge fails closed if a live approved connection has no institution subject identifier.
 
 Do not use the PASSID partner code, institution portal password, or a user PassID code as `PASSID_CONNECT_KEY`.
 
@@ -127,6 +136,10 @@ Password: `CareerBridgeDemo!2026`
 - Webhook raw-body HMAC verification and event-ID replay protection
 - Idempotency keys on hosted-session creation and authorization-code exchange
 - Server-side authorization-code exchange and partial-consent handling
+- One-person/one-account enforcement using a keyed digest of PASSID's institution-scoped subject; the raw subject is never stored or logged
+- Durable signup and Connect-session rate limits keyed by HMAC digests rather than raw network addresses
+- Active-connection and pending-session deduplication, with conflicting upstream connections revoked
+- Identity binding retained after consent revocation to prevent identity switching
 - Sanitized admin views and audit logs
 - No PASSID secret key in frontend responses
 # CAREERBRIDGE

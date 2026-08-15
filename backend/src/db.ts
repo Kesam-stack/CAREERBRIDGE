@@ -62,6 +62,23 @@ export function migrate(db: Database): void {
   if (!passidSessionColumns.has("pkce_verifier_ciphertext")) db.run("ALTER TABLE passid_sessions ADD COLUMN pkce_verifier_ciphertext TEXT");
   if (!passidSessionColumns.has("redirect_uri")) db.run("ALTER TABLE passid_sessions ADD COLUMN redirect_uri TEXT");
   db.run(`CREATE TABLE IF NOT EXISTS passid_connections (id TEXT PRIMARY KEY, application_id TEXT NOT NULL REFERENCES applications(id), candidate_user_id TEXT NOT NULL REFERENCES users(id), passid_session_id TEXT NOT NULL, connection_id TEXT, status TEXT NOT NULL, granted_scopes TEXT NOT NULL, consent_status TEXT NOT NULL, expires_at INTEGER, last_webhook_event TEXT, last_api_request_id TEXT, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)`);
+  const passidConnectionColumns = new Set((db.prepare("PRAGMA table_info(passid_connections)").all() as any[]).map((column) => String(column.name)));
+  if (!passidConnectionColumns.has("institution_subject_hash")) db.run("ALTER TABLE passid_connections ADD COLUMN institution_subject_hash TEXT");
+  db.run(`CREATE TABLE IF NOT EXISTS passid_subject_bindings (
+    subject_hash TEXT PRIMARY KEY,
+    candidate_user_id TEXT NOT NULL UNIQUE REFERENCES users(id),
+    first_connection_id TEXT,
+    status TEXT NOT NULL DEFAULT 'bound',
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+  )`);
+  db.run(`CREATE TABLE IF NOT EXISTS security_rate_limit_events (
+    id TEXT PRIMARY KEY,
+    action TEXT NOT NULL,
+    key_hash TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+  )`);
+  db.run("CREATE INDEX IF NOT EXISTS idx_security_rate_limit_lookup ON security_rate_limit_events(action,key_hash,created_at)");
   db.run(`CREATE TABLE IF NOT EXISTS verification_results (id TEXT PRIMARY KEY, application_id TEXT NOT NULL REFERENCES applications(id), candidate_user_id TEXT NOT NULL REFERENCES users(id), result_json TEXT NOT NULL, updated_at INTEGER NOT NULL)`);
   db.run(`CREATE TABLE IF NOT EXISTS passid_webhook_events (id TEXT PRIMARY KEY, type TEXT NOT NULL, passid_connection_id TEXT, processed_at INTEGER NOT NULL, payload_summary TEXT NOT NULL)`);
   db.run(`CREATE TABLE IF NOT EXISTS audit_logs (id TEXT PRIMARY KEY, actor_user_id TEXT, action TEXT NOT NULL, target_type TEXT, target_id TEXT, detail_json TEXT NOT NULL, created_at INTEGER NOT NULL)`);

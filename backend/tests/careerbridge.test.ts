@@ -65,6 +65,7 @@ function mockPassid(): PassidClient {
         granted_scopes: ["identity.read", "income.read"],
         verification: { identity: "verified", income: "verified" },
         request_id: "req_token_test",
+        institution_subject_id: "subject_amara",
       };
     },
     async retrieveSession(sessionId) {
@@ -424,6 +425,7 @@ describe("CareerBridge independent PASSID institution app", () => {
           granted_scopes: ["identity.read", "income.read"],
           verification: { identity: "verified", income: "verified" },
           request_id: "req_live_token",
+          institution_subject_id: "subject_amara_live",
         };
       },
       async retrieveSession() {
@@ -449,6 +451,92 @@ describe("CareerBridge independent PASSID institution app", () => {
     expect(exchangeCalled).toBe(true);
     const storedAfter = liveDb.prepare("SELECT pkce_verifier_ciphertext FROM passid_sessions WHERE application_id=?").get(application.id) as any;
     expect(storedAfter.pkce_verifier_ciphertext).toBeNull();
+    const binding = liveDb.prepare("SELECT subject_hash,candidate_user_id FROM passid_subject_bindings").get() as any;
+    expect(binding.candidate_user_id).toBe(auth.user.id);
+    expect(binding.subject_hash).not.toContain("subject_amara_live");
+
+    const repeatedSession = await created.app.request("/api/passid/connect/sessions", {
+      method: "POST",
+      headers: { Cookie: auth.cookie, "Content-Type": "application/json", "X-CSRF-Token": auth.csrf },
+      body: JSON.stringify({ application_id: application.id }),
+    });
+    expect(repeatedSession.status).toBe(409);
+    expect((await repeatedSession.json() as any).error).toBe("passid_already_connected");
+  });
+
+  it("prevents one PassID identity from being attached to multiple CareerBridge accounts", async () => {
+    const uniqueDb = new Database(":memory:");
+    migrate(uniqueDb);
+    seed(uniqueDb);
+    const states: string[] = [];
+    let sessionCounter = 0;
+    const revoked: string[] = [];
+    const uniquenessPassid: PassidClient = {
+      ...mockPassid(),
+      async createSession(input) {
+        states.push(input.state);
+        sessionCounter += 1;
+        return {
+          session_id: `pcs_live_unique_${sessionCounter}`,
+          hosted_url: `https://app.passid.io/connect/authorize?env=live&session=pcs_live_unique_${sessionCounter}`,
+          status: "pending_customer",
+        };
+      },
+      async exchangeCode(input) {
+        return {
+          session_id: input.session_id,
+          status: "approved",
+          connection_id: `conn_${input.code}`,
+          granted_scopes: ["identity.read", "income.read"],
+          verification: { identity: "verified", income: "verified" },
+          institution_subject_id: "same_passid_person",
+        };
+      },
+      async revokeConnection(connectionId) {
+        revoked.push(connectionId);
+        return { status: "revoked" };
+      },
+    };
+    const uniqueApp = createCareerBridgeApp({ env: { ...baseEnv, PASSID_ENVIRONMENT: "live" }, db: uniqueDb, passidClient: uniquenessPassid }).app;
+
+    const first = await login(uniqueApp, "amara@careerbridge.test");
+    const firstApplication = await applyToDemoJob(uniqueApp, first);
+    await uniqueApp.request("/api/passid/connect/sessions", {
+      method: "POST",
+      headers: { Cookie: first.cookie, "Content-Type": "application/json", "X-CSRF-Token": first.csrf },
+      body: JSON.stringify({ application_id: firstApplication.id }),
+    });
+    const firstCallback = await uniqueApp.request(`/api/passid/callback?state=${encodeURIComponent(states[0])}&code=first&status=approved&session_id=pcs_live_unique_1`, { redirect: "manual" });
+    expect(firstCallback.headers.get("location")).toContain("result=success");
+
+    const signup = await uniqueApp.request("/api/auth/signup", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Real-IP": "203.0.113.42" },
+      body: JSON.stringify({ name: "Second Account", email: "second.account@example.com", password: "ValidPassword2026", role: "candidate", accepted_terms: true }),
+    });
+    expect(signup.status).toBe(201);
+    const signupBody = await signup.json() as any;
+    const second = { cookie: signup.headers.get("set-cookie")!.split(";")[0], csrf: signupBody.csrf, user: signupBody.user };
+    const secondApplication = await applyToDemoJob(uniqueApp, second);
+    await uniqueApp.request("/api/passid/connect/sessions", {
+      method: "POST",
+      headers: { Cookie: second.cookie, "Content-Type": "application/json", "X-CSRF-Token": second.csrf },
+      body: JSON.stringify({ application_id: secondApplication.id }),
+    });
+    const secondCallback = await uniqueApp.request(`/api/passid/callback?state=${encodeURIComponent(states[1])}&code=second&status=approved&session_id=pcs_live_unique_2`, { redirect: "manual" });
+    expect(secondCallback.headers.get("location")).toContain("result=duplicate_identity");
+    expect(revoked).toContain("conn_second");
+    expect((uniqueDb.prepare("SELECT COUNT(*) AS count FROM passid_connections WHERE candidate_user_id=?").get(second.user.id) as any).count).toBe(0);
+    expect((uniqueDb.prepare("SELECT passid_status FROM candidate_profiles WHERE user_id=?").get(second.user.id) as any).passid_status).toBe("identity_conflict");
+    expect((uniqueDb.prepare("SELECT status FROM applications WHERE id=?").get(secondApplication.id) as any).status).toBe("identity_conflict");
+
+    const blockedRetry = await uniqueApp.request("/api/passid/connect/sessions", {
+      method: "POST",
+      headers: { Cookie: second.cookie, "Content-Type": "application/json", "X-CSRF-Token": second.csrf },
+      body: JSON.stringify({ application_id: secondApplication.id }),
+    });
+    expect(blockedRetry.status).toBe(409);
+    expect((await blockedRetry.json() as any).error).toBe("passid_identity_conflict");
   });
 
   it("keeps an application in verification when PASSID grants only some required scopes", async () => {
@@ -514,6 +602,29 @@ describe("CareerBridge independent PASSID institution app", () => {
     db.prepare("INSERT INTO applications (id,job_id,candidate_user_id,status,created_at,updated_at) VALUES ('app_webhook','job_demo','candidate_demo','under_review',?,?)").run(Date.now(), Date.now());
     db.prepare("INSERT INTO passid_connections (id,application_id,candidate_user_id,passid_session_id,connection_id,status,granted_scopes,consent_status,created_at,updated_at) VALUES ('cbconn_1','app_webhook','candidate_demo','pcs_1','conn_sandbox_test_123','approved','[\"identity.read\"]','active',?,?)").run(Date.now(), Date.now());
     db.prepare("INSERT INTO verification_results (id,application_id,candidate_user_id,result_json,updated_at) VALUES ('vr_webhook','app_webhook','candidate_demo',?,?)").run(JSON.stringify({ identity: "verified", consent_status: "active" }), Date.now());
+    const createdPayload = JSON.stringify({ event_id: "evt_created_1", event_type: "connection.created", created_at: new Date().toISOString(), data: { connection_id: "conn_sandbox_test_123", institution_subject_id: "passid_subject_webhook_secret", status: "approved" } });
+    const createdSig = hmac(createdPayload, baseEnv.PASSID_WEBHOOK_SECRET);
+    const createdRes = await app.request("/api/webhooks/passid", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-PASSID-Signature": `sha256=${createdSig}` },
+      body: createdPayload,
+    });
+    expect(createdRes.status).toBe(200);
+    const bound = db.prepare("SELECT institution_subject_hash FROM passid_connections WHERE id='cbconn_1'").get() as any;
+    expect(bound.institution_subject_hash).toBe(hmac("passid_subject_webhook_secret", baseEnv.ENCRYPTION_KEY));
+    expect(JSON.stringify(db.prepare("SELECT * FROM passid_webhook_events WHERE id='evt_created_1'").get())).not.toContain("passid_subject_webhook_secret");
+
+    const mismatchPayload = JSON.stringify({ event_id: "evt_created_2", event_type: "connection.created", created_at: new Date().toISOString(), data: { connection_id: "conn_sandbox_test_123", institution_subject_id: "different_passid_person", status: "approved" } });
+    const mismatchSig = hmac(mismatchPayload, baseEnv.PASSID_WEBHOOK_SECRET);
+    const mismatchRes = await app.request("/api/webhooks/passid", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-PASSID-Signature": `sha256=${mismatchSig}` },
+      body: mismatchPayload,
+    });
+    expect(mismatchRes.status).toBe(200);
+    expect((db.prepare("SELECT passid_status FROM candidate_profiles WHERE user_id='candidate_demo'").get() as any).passid_status).toBe("identity_conflict");
+    expect((db.prepare("SELECT consent_status FROM passid_connections WHERE id='cbconn_1'").get() as any).consent_status).toBe("revoked");
+
     const payload = JSON.stringify({ event_id: "evt_1", event_type: "connection.revoked", created_at: new Date().toISOString(), data: { connection_id: "conn_sandbox_test_123", status: "revoked" } });
     const sig = hmac(payload, baseEnv.PASSID_WEBHOOK_SECRET);
     const catcher = await app.request("/api/institution/webhook-catcher", {
@@ -623,6 +734,26 @@ describe("CareerBridge independent PASSID institution app", () => {
     expect((await employerWithoutOrganization.json() as any).error).toBe("organization_name_required");
   });
 
+  it("rate-limits bulk account creation by network without storing raw IP addresses", async () => {
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      const response = await app.request("/api/auth/signup", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Real-IP": "198.51.100.25" },
+        body: JSON.stringify({}),
+      });
+      expect(response.status).toBe(400);
+    }
+    const limited = await app.request("/api/auth/signup", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Real-IP": "198.51.100.25" },
+      body: JSON.stringify({}),
+    });
+    expect(limited.status).toBe(429);
+    expect(limited.headers.get("retry-after")).toBeTruthy();
+    const stored = db.prepare("SELECT key_hash FROM security_rate_limit_events WHERE action='signup' LIMIT 1").get() as any;
+    expect(stored.key_hash).not.toContain("198.51.100.25");
+  });
+
   it("lets employers post a published job and see it in their job list", async () => {
     const employer = await login(app, "recruiter@careerbridge.test", "employer");
     const create = await app.request("/api/employer/jobs", {
@@ -677,7 +808,7 @@ describe("PASSID HTTP client contract", () => {
         return Response.json({ data: { active: true, environment: "sandbox" } }, { headers: { "x-request-id": "req_key_contract" } });
       }
       if (url.endsWith("/token") && init?.method === "POST") {
-        return Response.json({ data: { connection_id: "conn_sandbox_contract", granted_scopes: ["identity.read"], evidence_result: "verified" } }, { headers: { "x-request-id": "req_token_contract" } });
+        return Response.json({ data: { connection_id: "conn_sandbox_contract", institution_subject_id: "subject_contract", granted_scopes: ["identity.read"], evidence_result: "verified" } }, { headers: { "x-request-id": "req_token_contract" } });
       }
       if (url.endsWith("/sessions/pcs_sandbox_contract")) {
         return Response.json({
@@ -734,6 +865,7 @@ describe("PASSID HTTP client contract", () => {
         code_verifier: "verifier_contract_abcdefghijklmnopqrstuvwxyz1234567890",
       });
       expect(exchanged.connection_id).toBe("conn_sandbox_contract");
+      expect(exchanged.institution_subject_id).toBe("subject_contract");
       expect(result.connection_id).toBe("conn_sandbox_contract");
       expect(result.verification.identity).toBe("verified");
     } finally {

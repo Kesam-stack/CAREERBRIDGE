@@ -45,6 +45,15 @@ function now() {
   return Date.now();
 }
 
+function clientAddress(c: any): string {
+  const railwayClient = c.req.header("x-real-ip")?.trim();
+  if (railwayClient) return railwayClient;
+  // Fallback for local/non-Railway deployments. Taking the last hop avoids
+  // trusting an attacker-controlled value prepended to X-Forwarded-For.
+  const forwarded = c.req.header("x-forwarded-for")?.split(",").map((value: string) => value.trim()).filter(Boolean).at(-1);
+  return forwarded || "unknown-client";
+}
+
 function isSafePassidHostedUrl(value: string): boolean {
   try {
     const url = new URL(value);
@@ -102,6 +111,38 @@ export function createCareerBridgeApp(options: AppOptions = {}) {
   const db = options.db ?? ownedDb!.db;
   const passid = options.passidClient ?? createPassidClient(env);
   const app = new Hono();
+
+  function consumeRateLimit(action: string, key: string, limit: number, windowMs: number): { allowed: boolean; retryAfterSeconds: number } {
+    const cutoff = now() - windowMs;
+    const keyHash = hmac(`${action}:${key}`, env.SESSION_SECRET);
+    return db.transaction(() => {
+      db.prepare("DELETE FROM security_rate_limit_events WHERE created_at < ?").run(now() - 1000 * 60 * 60 * 24 * 2);
+      const row = db.prepare("SELECT COUNT(*) AS count, MIN(created_at) AS oldest FROM security_rate_limit_events WHERE action=? AND key_hash=? AND created_at>=?")
+        .get(action, keyHash, cutoff) as any;
+      if (Number(row?.count ?? 0) >= limit) {
+        const retryAfterSeconds = Math.max(1, Math.ceil((Number(row?.oldest ?? now()) + windowMs - now()) / 1000));
+        return { allowed: false, retryAfterSeconds };
+      }
+      db.prepare("INSERT INTO security_rate_limit_events (id,action,key_hash,created_at) VALUES (?,?,?,?)")
+        .run(randomId("rate"), action, keyHash, now());
+      return { allowed: true, retryAfterSeconds: 0 };
+    })();
+  }
+
+  function bindPassidSubject(candidateUserId: string, institutionSubjectId: string, connectionId: string): "bound" | "same" | "duplicate_identity" | "identity_mismatch" {
+    const subjectHash = hmac(institutionSubjectId, env.ENCRYPTION_KEY);
+    const subjectBinding = db.prepare("SELECT candidate_user_id FROM passid_subject_bindings WHERE subject_hash=?").get(subjectHash) as any;
+    if (subjectBinding && subjectBinding.candidate_user_id !== candidateUserId) return "duplicate_identity";
+    const candidateBinding = db.prepare("SELECT subject_hash FROM passid_subject_bindings WHERE candidate_user_id=?").get(candidateUserId) as any;
+    if (candidateBinding && candidateBinding.subject_hash !== subjectHash) return "identity_mismatch";
+    if (subjectBinding) {
+      db.prepare("UPDATE passid_subject_bindings SET status='bound', updated_at=? WHERE subject_hash=?").run(now(), subjectHash);
+      return "same";
+    }
+    db.prepare("INSERT INTO passid_subject_bindings (subject_hash,candidate_user_id,first_connection_id,status,created_at,updated_at) VALUES (?,?,?,?,?,?)")
+      .run(subjectHash, candidateUserId, connectionId, "bound", now(), now());
+    return "bound";
+  }
 
   function createUserSession(c: any, user: User) {
     const sessionId = randomId("sess");
@@ -167,6 +208,11 @@ export function createCareerBridgeApp(options: AppOptions = {}) {
   });
 
   app.post("/api/auth/signup", async (c) => {
+    const signupLimit = consumeRateLimit("signup", clientAddress(c), 20, 1000 * 60 * 60);
+    if (!signupLimit.allowed) {
+      c.header("Retry-After", String(signupLimit.retryAfterSeconds));
+      return c.json({ error: "signup_rate_limited", retry_after_seconds: signupLimit.retryAfterSeconds }, 429);
+    }
     const parsed = z.object({
       email: z.string().trim().email().max(254),
       password: z.string().min(12).max(128)
@@ -380,6 +426,21 @@ export function createCareerBridgeApp(options: AppOptions = {}) {
     const body = z.object({ application_id: z.string() }).parse(await c.req.json());
     const appRow = db.prepare("SELECT a.*, j.verification_requirements, j.title FROM applications a JOIN jobs j ON j.id=a.job_id WHERE a.id=? AND a.candidate_user_id=?").get(body.application_id, user.id) as any;
     if (!appRow) return c.json({ error: "application_not_found" }, 404);
+    const profile = db.prepare("SELECT passid_status FROM candidate_profiles WHERE user_id=?").get(user.id) as any;
+    if (profile?.passid_status === "identity_conflict") return c.json({ error: "passid_identity_conflict" }, 409);
+    const existingConnection = db.prepare("SELECT id,status,consent_status FROM passid_connections WHERE application_id=? AND candidate_user_id=? AND consent_status NOT IN ('revoked','expired') ORDER BY created_at DESC LIMIT 1")
+      .get(appRow.id, user.id) as any;
+    if (existingConnection) return c.json({ error: "passid_already_connected", connection_id: existingConnection.id }, 409);
+    const connectLimit = consumeRateLimit("passid_session", user.id, 10, 1000 * 60 * 60);
+    if (!connectLimit.allowed) {
+      c.header("Retry-After", String(connectLimit.retryAfterSeconds));
+      return c.json({ error: "passid_session_rate_limited", retry_after_seconds: connectLimit.retryAfterSeconds }, 429);
+    }
+    const networkConnectLimit = consumeRateLimit("passid_session_network", clientAddress(c), 60, 1000 * 60 * 60);
+    if (!networkConnectLimit.allowed) {
+      c.header("Retry-After", String(networkConnectLimit.retryAfterSeconds));
+      return c.json({ error: "passid_session_rate_limited", retry_after_seconds: networkConnectLimit.retryAfterSeconds }, 429);
+    }
     const requiredScopes = jsonArray(appRow.verification_requirements).map((req) => REQUIREMENT_TO_SCOPE[req]).filter(Boolean);
     const scopes = sanitizeScopes(requiredScopes, APPROVED_SCOPES);
     if (!scopes.length) return c.json({ error: "no_approved_scopes" }, 400);
@@ -387,7 +448,8 @@ export function createCareerBridgeApp(options: AppOptions = {}) {
     const existingSession = db.prepare(`
       SELECT passid_session_id, hosted_url, expires_at, scopes, status
       FROM passid_sessions
-      WHERE application_id=? AND candidate_user_id=? AND expires_at > ? AND status != 'failed'
+      WHERE application_id=? AND candidate_user_id=? AND expires_at > ? AND used_at IS NULL
+        AND status IN ('creating','pending','pending_customer')
       ORDER BY created_at DESC
       LIMIT 1
     `).get(appRow.id, user.id, now()) as any;
@@ -506,15 +568,32 @@ export function createCareerBridgeApp(options: AppOptions = {}) {
         return c.redirect(`${env.APP_URL}/verification?result=${encodeURIComponent(result.status)}`);
       }
       if (!result.connection_id) throw new Error("PASSID_APPROVED_WITHOUT_CONNECTION");
+      if (env.PASSID_ENVIRONMENT === "live" && !result.institution_subject_id) {
+        throw new Error("PASSID_MISSING_INSTITUTION_SUBJECT");
+      }
 
       const requestedScopes = jsonArray(row.scopes);
       const grantedScopes = sanitizeScopes(result.granted_scopes, requestedScopes);
       const committed = db.transaction(() => {
         const update = db.prepare("UPDATE passid_sessions SET used_at=?, status=?, pkce_verifier_ciphertext=NULL WHERE id=? AND used_at IS NULL").run(now(), result.status, row.id);
         if (update.changes !== 1) return false;
+        const subjectHash = result.institution_subject_id ? hmac(result.institution_subject_id, env.ENCRYPTION_KEY) : null;
+        if (result.institution_subject_id) {
+          const binding = bindPassidSubject(row.candidate_user_id, result.institution_subject_id, result.connection_id!);
+          if (binding === "duplicate_identity" || binding === "identity_mismatch") {
+            db.prepare("UPDATE candidate_profiles SET passid_status='identity_conflict' WHERE user_id=?").run(row.candidate_user_id);
+            db.prepare("UPDATE passid_sessions SET status=? WHERE id=?").run(binding, row.id);
+            db.prepare("UPDATE applications SET status='identity_conflict', updated_at=? WHERE id=?").run(now(), row.application_id);
+            audit(db, row.candidate_user_id, `passid.${binding}`, "application", row.application_id, {});
+            return binding;
+          }
+        }
+        const priorConnection = db.prepare("SELECT id FROM passid_connections WHERE application_id=? AND candidate_user_id=? AND consent_status NOT IN ('revoked','expired') LIMIT 1")
+          .get(row.application_id, row.candidate_user_id) as any;
+        if (priorConnection) return "already_connected";
         const connectionId = randomId("cbconn");
-        db.prepare("INSERT INTO passid_connections (id,application_id,candidate_user_id,passid_session_id,connection_id,status,granted_scopes,consent_status,expires_at,last_api_request_id,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)")
-          .run(connectionId, row.application_id, row.candidate_user_id, row.passid_session_id, result.connection_id, result.status, JSON.stringify(grantedScopes), "active", result.expires_at ? Date.parse(result.expires_at) : null, result.request_id ?? null, now(), now());
+        db.prepare("INSERT INTO passid_connections (id,application_id,candidate_user_id,passid_session_id,connection_id,status,granted_scopes,consent_status,expires_at,last_api_request_id,institution_subject_hash,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)")
+          .run(connectionId, row.application_id, row.candidate_user_id, row.passid_session_id, result.connection_id, result.status, JSON.stringify(grantedScopes), "active", result.expires_at ? Date.parse(result.expires_at) : null, result.request_id ?? null, subjectHash, now(), now());
         const scopeStatus = (scope: string, key: string) => requestedScopes.includes(scope)
           ? (grantedScopes.includes(scope) ? (result.verification[key] ?? "available") : "not_granted")
           : "not_requested";
@@ -534,7 +613,7 @@ export function createCareerBridgeApp(options: AppOptions = {}) {
           ["verification_status.read", safeResult.verification_status],
         ].filter(([scope]) => requestedScopes.includes(scope));
         const verificationComplete = requiredStatuses.every(([, status]) =>
-          !["not_granted", "not_verified", "unavailable"].includes(status),
+          ["verified", "approved", "active"].includes(String(status).toLowerCase()),
         );
         db.prepare("INSERT OR REPLACE INTO verification_results (id,application_id,candidate_user_id,result_json,updated_at) VALUES (?,?,?,?,?)")
           .run(randomId("vresult"), row.application_id, row.candidate_user_id, JSON.stringify(safeResult), now());
@@ -546,8 +625,22 @@ export function createCareerBridgeApp(options: AppOptions = {}) {
         return verificationComplete ? "complete" : "partial";
       })();
       if (!committed) return c.redirect(`${env.APP_URL}/verification?result=invalid_state`);
+      if (committed === "duplicate_identity" || committed === "identity_mismatch" || committed === "already_connected") {
+        try {
+          await passid.revokeConnection(result.connection_id);
+        } catch (error) {
+          console.warn("[passid duplicate connection revoke failed]", { status: (error as any)?.status, requestId: (error as any)?.requestId });
+        }
+        return c.redirect(`${env.APP_URL}/verification?result=${committed}`);
+      }
       return c.redirect(`${env.APP_URL}/verification?result=${committed === "complete" ? "success" : "partial_consent"}`);
-    } catch {
+    } catch (error) {
+      if ((error as Error)?.message === "PASSID_MISSING_INSTITUTION_SUBJECT") {
+        db.prepare("UPDATE passid_sessions SET used_at=?, status='identity_subject_missing', pkce_verifier_ciphertext=NULL WHERE id=? AND used_at IS NULL").run(now(), row.id);
+        db.prepare("UPDATE applications SET status='verification_required', updated_at=? WHERE id=?").run(now(), row.application_id);
+        audit(db, row.candidate_user_id, "passid.identity_subject_missing", "application", row.application_id, {});
+        return c.redirect(`${env.APP_URL}/verification?result=identity_subject_missing`);
+      }
       return c.redirect(`${env.APP_URL}/verification?result=retrieve_failed`);
     }
   });
@@ -629,8 +722,41 @@ export function createCareerBridgeApp(options: AppOptions = {}) {
     if (existing) return c.json({ ok: true, duplicate: true });
     const type = String(event.event_type ?? event.type ?? eventIdHeader ?? "unknown");
     const connectionId = event.data?.connection_id ?? event.data?.passid_connection_id ?? null;
+    const institutionSubjectId = event.data?.institution_subject_id ? String(event.data.institution_subject_id) : null;
     db.prepare("INSERT INTO passid_webhook_events (id,type,passid_connection_id,processed_at,payload_summary) VALUES (?,?,?,?,?)")
       .run(eventId, type, connectionId, now(), JSON.stringify({ type, connection_id: connectionId, status: event.data?.status ?? null }));
+    let identityConflictDiscovered = false;
+    if (connectionId && institutionSubjectId && type === "connection.created") {
+      const conn = db.prepare("SELECT * FROM passid_connections WHERE connection_id=?").get(connectionId) as any;
+      if (conn) {
+        db.transaction(() => {
+          const binding = bindPassidSubject(conn.candidate_user_id, institutionSubjectId, connectionId);
+          const subjectHash = hmac(institutionSubjectId, env.ENCRYPTION_KEY);
+          if (binding === "duplicate_identity" || binding === "identity_mismatch") {
+            db.prepare("UPDATE candidate_profiles SET passid_status='identity_conflict' WHERE user_id=?").run(conn.candidate_user_id);
+            db.prepare("UPDATE passid_connections SET status='identity_conflict', consent_status='revoked', last_webhook_event=?, updated_at=? WHERE id=?")
+              .run(type, now(), conn.id);
+            db.prepare("UPDATE applications SET status='identity_conflict', updated_at=? WHERE id=?").run(now(), conn.application_id);
+            audit(db, conn.candidate_user_id, `passid.${binding}.webhook`, "application", conn.application_id, {});
+            identityConflictDiscovered = true;
+          } else {
+            db.prepare("UPDATE passid_connections SET institution_subject_hash=?, last_webhook_event=?, updated_at=? WHERE id=?")
+              .run(subjectHash, type, now(), conn.id);
+          }
+        })();
+      }
+    }
+    if (identityConflictDiscovered && connectionId) {
+      try {
+        await passid.revokeConnection(String(connectionId));
+      } catch (error) {
+        // Let PASSID retry the signed event instead of acknowledging a connection
+        // that is only locally revoked.
+        db.prepare("DELETE FROM passid_webhook_events WHERE id=?").run(eventId);
+        console.warn("[passid webhook identity-conflict revoke failed]", { status: (error as any)?.status, requestId: (error as any)?.requestId });
+        return c.json({ error: "passid_revoke_failed" }, 502);
+      }
+    }
     if (connectionId && /revoked|consent\.revoked|connection\.revoked|connection\.expired/.test(type)) {
       const conn = db.prepare("SELECT * FROM passid_connections WHERE connection_id=?").get(connectionId) as any;
       if (conn) {
@@ -653,7 +779,15 @@ export function createCareerBridgeApp(options: AppOptions = {}) {
       ORDER BY pc.created_at DESC
     `).all();
     const events = db.prepare("SELECT id,type,passid_connection_id,processed_at,payload_summary FROM passid_webhook_events ORDER BY processed_at DESC LIMIT 50").all();
-    return c.json({ environment: env.PASSID_ENVIRONMENT, connections, events });
+    const identityConflicts = db.prepare("SELECT COUNT(*) AS count FROM candidate_profiles WHERE passid_status='identity_conflict'").get() as any;
+    const subjectBindings = db.prepare("SELECT COUNT(*) AS count FROM passid_subject_bindings WHERE status='bound'").get() as any;
+    return c.json({
+      environment: env.PASSID_ENVIRONMENT,
+      connections,
+      events,
+      identityConflictCount: Number(identityConflicts?.count ?? 0),
+      boundIdentityCount: Number(subjectBindings?.count ?? 0),
+    });
   });
 
   app.get("/api/admin/passid/readiness", async (c) => {

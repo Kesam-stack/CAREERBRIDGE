@@ -64,6 +64,10 @@ function authErrorMessage(body: any, fallback: string) {
     organization_name_required: "Enter your registered organization name.",
     invalid_credentials: "The email or password is incorrect. If you do not have an account yet, create one first.",
     invalid_login: "Enter a valid email address and password.",
+    signup_rate_limited: "Too many signup attempts were made from this network. Please wait and try again.",
+    passid_session_rate_limited: "Too many PASSID sessions were requested. Please wait before trying again.",
+    passid_already_connected: "PASSID is already connected for this application.",
+    passid_identity_conflict: "This account needs identity review before PASSID can be used again.",
   };
   if (known[body?.error]) return known[body.error];
   const fieldMessages = Object.values(body?.fields ?? {}).flat().map(String);
@@ -77,6 +81,21 @@ function authErrorMessage(body: any, fallback: string) {
     return message;
   });
   return validationMessages[0] ?? body?.message ?? fallback;
+}
+
+function passidCallbackMessage(result: string) {
+  const messages: Record<string, string> = {
+    success: "PASSID verification completed successfully.",
+    partial_consent: "PASSID connected, but not every required permission was granted.",
+    declined: "PASSID access was declined. You can start a new request when ready.",
+    duplicate_identity: "This verified PASSID identity is already connected to another CareerBridge account.",
+    identity_mismatch: "This CareerBridge account is already bound to a different verified PASSID identity.",
+    identity_subject_missing: "PASSID did not return the institution identity reference required to prevent duplicate accounts.",
+    already_connected: "PASSID is already connected for this application.",
+    missing_code: "PASSID did not return the one-time authorization code.",
+    retrieve_failed: "CareerBridge could not complete the PASSID authorization. Please try again.",
+  };
+  return messages[result] ?? `PASSID callback result: ${titleCase(result)}`;
 }
 
 function App() {
@@ -397,7 +416,7 @@ function Verification({ auth }: { auth: any }) {
   async function verify(application: Application) {
     const res = await api("/api/passid/connect/sessions", { method: "POST", body: JSON.stringify({ application_id: application.id }) }, auth.csrf);
     const body = await res.json();
-    if (!res.ok) return setMessage(body.error ?? "Unable to create PASSID session");
+    if (!res.ok) return setMessage(authErrorMessage(body, "Unable to create PASSID session"));
     setMessage("");
     setWalletSession({
       applicationTitle: application.title,
@@ -420,7 +439,7 @@ function Verification({ auth }: { auth: any }) {
     await copyWalletLink();
   }
   return <section className="page"><PageTitle title="PASSID verification" subtitle="Review consent categories, open hosted PASSID Connect, and track access." />
-    {params.get("result") && <div className="notice">PASSID callback result: {params.get("result")}</div>}
+    {params.get("result") && <div className="notice">{passidCallbackMessage(params.get("result")!)}</div>}
     {message && <div className="notice">{message}</div>}
     <div className="notice">Start verification from a CareerBridge application below. Sign-in, account creation, identity checks, and consent happen only on PassID's hosted authorization page.</div>
     {walletSession && <div className="wallet-panel">
@@ -511,7 +530,7 @@ function AdminPassid({ auth }: { auth: any }) {
     return <section className="page"><PageTitle title="PASSID integration monitor" subtitle="Admin access is required." /><div className="notice">Log in as a CareerBridge administrator to view sanitized PASSID connection and webhook records.</div></section>;
   }
   return <section className="page"><PageTitle title="PASSID integration monitor" subtitle="Environment, sessions, connections, webhooks, and sanitized audit visibility." />
-    <div className="notice">No secret keys or webhook secrets are displayed here.</div>
+    <div className="notice">No secret keys, identity references, or webhook secrets are displayed here. Bound identities: {data?.boundIdentityCount ?? 0}. Identity conflicts: {data?.identityConflictCount ?? 0}.</div>
     <div className="grid-2"><div className="data-panel"><h2>Connections</h2>{(data?.connections ?? []).map((c: any) => <p key={c.id}>{c.candidate_reference} · {c.status} · {c.consent_status}</p>)}</div><div className="data-panel"><h2>Webhook events</h2>{(data?.events ?? []).map((e: any) => <p key={e.id}>{e.type} · {e.id}</p>)}</div></div>
   </section>;
 }
