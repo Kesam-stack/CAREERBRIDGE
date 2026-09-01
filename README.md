@@ -4,6 +4,8 @@ CareerBridge is a separate institution application that integrates PASSID as an 
 
 Identity and credential verification powered by PASSID.
 
+CareerBridge also includes a PASSID Pay private-preview experience for verified-payee readiness and future permissioned payouts. It is intentionally informational: PASSID Pay does not currently expose a public API, SDK, production endpoint, transaction engine, ledger, or payout rail, so CareerBridge does not create transactions or imply that funds can move today.
+
 ## Architecture
 
 ```text

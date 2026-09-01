@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { BrowserRouter, Link, NavLink, Route, Routes, useNavigate, useParams, useSearchParams } from "react-router-dom";
-import { BadgeCheck, BriefcaseBusiness, Building2, CalendarClock, CheckCircle2, ChevronRight, ClipboardList, Copy, ExternalLink, KeyRound, Layers3, LockKeyhole, Search, ShieldCheck, Smartphone, Sparkles, UserRoundCheck, UsersRound, Webhook, XCircle } from "lucide-react";
+import { ArrowRightLeft, BadgeCheck, BriefcaseBusiness, Building2, CalendarClock, CheckCircle2, ChevronRight, ClipboardList, Copy, ExternalLink, KeyRound, Landmark, Layers3, LockKeyhole, ReceiptText, Search, ShieldCheck, Smartphone, Sparkles, UserRoundCheck, UsersRound, WalletCards, Webhook, XCircle } from "lucide-react";
 import "./styles.css";
 
 type User = { id: string; email: string; role: "candidate" | "employer" | "university" | "admin"; name: string };
@@ -128,6 +128,7 @@ function App() {
           <Route path="/saved" element={<Placeholder title="Saved jobs" text="Saved roles are kept private to your CareerBridge account." />} />
           <Route path="/applications" element={<Applications auth={value} />} />
           <Route path="/verification" element={<Verification auth={value} />} />
+          <Route path="/pay" element={<PassidPay auth={value} />} />
           <Route path="/settings" element={<Settings auth={value} />} />
           <Route path="/employer/signup" element={<Signup auth={value} forcedRole="employer" />} />
           <Route path="/employer/login" element={<Login auth={value} />} />
@@ -169,6 +170,7 @@ function Shell({ auth, loading, children }: { auth: any; loading: boolean; child
           <NavLink to="/dashboard"><UserRoundCheck size={18} /> Candidate</NavLink>
           <NavLink to="/applications"><ClipboardList size={18} /> Applications</NavLink>
           <NavLink to="/verification"><ShieldCheck size={18} /> PASSID</NavLink>
+          <NavLink to="/pay"><WalletCards size={18} /> PASSID Pay <span className="nav-preview">Preview</span></NavLink>
           <NavLink to="/employer/dashboard"><Building2 size={18} /> Employer</NavLink>
           <NavLink to="/admin/passid"><Webhook size={18} /> Admin monitor</NavLink>
         </nav>
@@ -244,6 +246,14 @@ function Landing({ auth }: { auth: any }) {
         <FeatureCard title="Employer clarity" text="Every role lists what it needs up front, so applicants know what will be verified." />
         <FeatureCard title="Institution ready" text="Universities and administrators can support verified workflows without seeing secrets." />
       </div>
+      <div className="pay-promo">
+        <div>
+          <span className="eyebrow"><WalletCards size={15} /> Private preview</span>
+          <h2>From verified hiring to verified payouts.</h2>
+          <p>CareerBridge is preparing for PASSID Pay so institutions can route permissioned payouts to verified candidates with a consent-linked audit trail.</p>
+        </div>
+        <Link className="button secondary" to="/pay">Explore PASSID Pay <ChevronRight size={17} /></Link>
+      </div>
     </section>
   );
 }
@@ -313,10 +323,11 @@ function AuthCard({ title, children, onSubmit, error }: { title: string; childre
 
 function CandidateDashboard({ auth }: { auth: any }) {
   return <section className="page"><PageTitle title="Candidate dashboard" subtitle="Track profile readiness, applications, and PASSID verification." />
-    <div className="grid-3">
+    <div className="grid-4">
       <ActionCard icon={<UserRoundCheck />} title="Profile" text="Education, experience, skills, and documents stay under your control." link="/profile" />
       <ActionCard icon={<BriefcaseBusiness />} title="Job search" text="Discover roles that disclose their PASSID requirements before you apply." link="/jobs" />
       <ActionCard icon={<ShieldCheck />} title="PASSID verification" text="Review requested categories and consent through hosted PASSID Connect." link="/verification" />
+      <ActionCard icon={<WalletCards />} title="PASSID Pay" text="Check your verified-payee readiness and explore the upcoming permissioned payout flow." link="/pay" />
     </div>
   </section>;
 }
@@ -460,12 +471,77 @@ function Verification({ auth }: { auth: any }) {
   </section>;
 }
 
+function PassidPay({ auth }: { auth: any }) {
+  const [apps, setApps] = useState<Application[]>([]);
+  const [loading, setLoading] = useState(auth.user?.role === "candidate");
+  useEffect(() => {
+    if (auth.user?.role !== "candidate") {
+      setLoading(false);
+      return;
+    }
+    api("/api/applications")
+      .then((r) => r.json())
+      .then((body) => setApps(safeList(body.applications)))
+      .finally(() => setLoading(false));
+  }, [auth.user?.role]);
+
+  const verifiedApplication = apps.find((application) => ["under_review", "accepted", "hired"].includes(application.status));
+  const hasApplication = apps.length > 0;
+  const readiness = verifiedApplication
+    ? { label: "Identity ready", detail: `${verifiedApplication.title} has completed its required PASSID verification.`, tone: "ready" }
+    : hasApplication
+      ? { label: "Verification needed", detail: "Complete the PASSID request attached to your application before payout onboarding.", tone: "pending" }
+      : { label: "Application needed", detail: "Apply to an opportunity before starting verified-payee onboarding.", tone: "neutral" };
+
+  return <section className="page pay-page">
+    <div className="pay-hero">
+      <div className="pay-hero-copy">
+        <span className="eyebrow"><WalletCards size={16} /> PASSID Pay · Private preview</span>
+        <h1>Verified people.<br />Permissioned payouts.</h1>
+        <p>CareerBridge is preparing a safer bridge from verified hiring to payout onboarding—built around the identity consent candidates already control.</p>
+        <div className="hero-actions">
+          {auth.user?.role === "candidate" && !verifiedApplication
+            ? <Link className="button" to={hasApplication ? "/verification" : "/jobs"}>{hasApplication ? "Complete verification" : "Find an opportunity"} <ChevronRight size={17} /></Link>
+            : <a className="button" href="https://passid.io/passid-pay" target="_blank" rel="noreferrer">Join the private-preview waitlist <ExternalLink size={17} /></a>}
+          <Link className="button secondary" to="/verification">Review PASSID access</Link>
+        </div>
+      </div>
+      <div className="pay-card" aria-label="PASSID Pay preview card">
+        <div className="pay-card-top"><span>PASSID</span><strong>PAY</strong></div>
+        <div className="pay-card-chip"><span /><span /><span /></div>
+        <p>Verified payout identity</p>
+        <strong>{auth.user?.name ?? "CareerBridge candidate"}</strong>
+        <div className="pay-card-footer"><span>Consent required</span><ShieldCheck size={20} /></div>
+      </div>
+    </div>
+
+    {auth.user?.role === "candidate" && <div className="readiness-panel">
+      <div className={`readiness-icon ${readiness.tone}`}><BadgeCheck size={24} /></div>
+      <div><span className="eyebrow">Your readiness</span><h2>{loading ? "Checking PASSID status…" : readiness.label}</h2><p>{loading ? "Reviewing your CareerBridge applications." : readiness.detail}</p></div>
+      {!loading && <Link className="button secondary" to={verifiedApplication ? "/applications" : hasApplication ? "/verification" : "/jobs"}>View next step <ChevronRight size={16} /></Link>}
+    </div>}
+
+    <div className="pay-section-heading">
+      <span className="eyebrow">Planned capabilities</span>
+      <h2>One consent trail from identity to settlement.</h2>
+      <p>These capabilities describe the private-preview direction. They are not active payment features in CareerBridge today.</p>
+    </div>
+    <div className="grid-3">
+      <div className="pay-feature"><Landmark size={24} /><span>01</span><h3>Verified payout rails</h3><p>Prepare a recipient whose identity and eligibility have already been verified through PASSID.</p></div>
+      <div className="pay-feature"><ArrowRightLeft size={24} /><span>02</span><h3>Permissioned transfers</h3><p>Ask for explicit, purpose-specific customer authorization instead of retaining standing payment authority.</p></div>
+      <div className="pay-feature"><ReceiptText size={24} /><span>03</span><h3>Audit-ready settlement</h3><p>Associate each future transfer with the verified identity and consent record that authorized it.</p></div>
+    </div>
+    <div className="pay-disclosure"><LockKeyhole size={22} /><div><strong>Preview only—no funds move through CareerBridge.</strong><p>PASSID Pay currently has no public API, SDK, production endpoint, transaction engine, ledger, or payout rail. CareerBridge will keep payment actions disabled until an approved integration is available.</p></div></div>
+  </section>;
+}
+
 function EmployerDashboard({ auth }: { auth: any }) {
   return <section className="page"><PageTitle title="Employer dashboard" subtitle="Publish roles, review applicants, and request consented verification." />
-    <div className="grid-3">
+    <div className="grid-4">
       <ActionCard icon={<BriefcaseBusiness />} title="Manage jobs" text="Create internships and full-time roles with explicit PASSID requirements." link="/employer/jobs" />
       <ActionCard icon={<UsersRound />} title="Applicants" text="Review candidates with only permitted verification results." link="/applications" />
       <ActionCard icon={<Layers3 />} title="Organization profile" text="Keep organization status and compliance details current." link="/employer/settings" />
+      <ActionCard icon={<WalletCards />} title="PASSID Pay" text="Preview permissioned payouts linked to verified candidate identities and consent." link="/pay" />
     </div>
   </section>;
 }
