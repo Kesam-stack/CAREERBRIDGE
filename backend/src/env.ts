@@ -18,6 +18,7 @@ export interface CareerBridgeEnv {
   PASSID_PAY_PREVIEW_ENABLED: boolean;
   RESEND_API_KEY: string;
   PASSWORD_RESET_EMAIL_FROM: string;
+  PASSWORD_RESET_TEST_MODE: boolean;
 }
 
 const PLACEHOLDER = /^(changeme|change-me|placeholder|secret|test|todo|example)$/i;
@@ -87,6 +88,9 @@ export function getEnvironmentIssues(source: Record<string, string | undefined> 
   if (env === "sandbox" && (secret.startsWith("sk_live_") || publishable.startsWith("pk_live_"))) {
     issues.push("PASSID credentials: live keys cannot be used in sandbox mode");
   }
+  if (read(normalized, "PASSWORD_RESET_TEST_MODE").toLowerCase() === "true" && env !== "sandbox") {
+    issues.push("PASSWORD_RESET_TEST_MODE: can only be enabled with PASSID_ENVIRONMENT=sandbox");
+  }
   const apiBase = read(normalized, "PASSID_API_BASE_URL").replace(/\/+$/, "");
   if (env === "sandbox" && /\/v1\/connect$/.test(apiBase)) {
     issues.push("PASSID_API_BASE_URL: production Connect URL cannot be used in sandbox mode");
@@ -124,6 +128,7 @@ export function loadEnv(source: Record<string, string | undefined> = process.env
     PASSID_PAY_PREVIEW_ENABLED: read(source, "PASSID_PAY_PREVIEW_ENABLED").toLowerCase() !== "false",
     RESEND_API_KEY: read(source, "RESEND_API_KEY"),
     PASSWORD_RESET_EMAIL_FROM: read(source, "PASSWORD_RESET_EMAIL_FROM"),
+    PASSWORD_RESET_TEST_MODE: read(source, "PASSWORD_RESET_TEST_MODE").toLowerCase() === "true",
   };
 }
 

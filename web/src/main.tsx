@@ -294,23 +294,28 @@ function Login({ auth }: { auth: any }) {
 }
 
 function ForgotPassword() {
+  const navigate = useNavigate();
   const [email, setEmail] = useState("");
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
-  const [developmentResetUrl, setDevelopmentResetUrl] = useState("");
   async function submit(e: React.FormEvent) {
     e.preventDefault();
     setSubmitting(true);
     setError("");
     setMessage("");
-    setDevelopmentResetUrl("");
     try {
       const res = await api("/api/auth/password/forgot", { method: "POST", body: JSON.stringify({ email }) });
       const body = await res.json();
       if (!res.ok) throw new Error(body.error === "password_reset_rate_limited" ? "Too many reset requests. Please wait before trying again." : body.message ?? "Unable to request a reset link.");
+      if (body.test_reset_url) {
+        const resetUrl = new URL(body.test_reset_url, window.location.origin);
+        if (resetUrl.pathname === "/reset-password") {
+          navigate(`${resetUrl.pathname}${resetUrl.search}`, { replace: true });
+          return;
+        }
+      }
       setMessage(body.message);
-      setDevelopmentResetUrl(body.development_reset_url ?? "");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Unable to request a reset link.");
     } finally {
@@ -323,7 +328,6 @@ function ForgotPassword() {
       <label>Email address<input value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@example.com" type="email" autoComplete="email" required /></label>
       <button className="button" type="submit" disabled={submitting}>{submitting ? "Sending securely…" : "Send reset link"}</button>
     </> : <div className="auth-success" role="status"><CheckCircle2 size={22} /><div><strong>Check your email</strong><p>{message}</p></div></div>}
-    {developmentResetUrl && <div className="development-link"><strong>Local development only</strong><p>Email delivery is replaced with this private test link.</p><a className="button secondary" href={developmentResetUrl}>Open reset link</a></div>}
     <p className="auth-link-row"><Link to="/login">← Back to login</Link></p>
   </AuthCard>;
 }

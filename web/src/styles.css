@@ -183,8 +183,6 @@ label { display: grid; gap: 6px; color: #42546b; font-size: 13px; font-weight: 7
 .auth-success { padding: 16px; display: flex; align-items: flex-start; gap: 12px; border: 1px solid #a7f3d0; border-radius: 12px; color: #065f46; background: #ecfdf5; }
 .auth-success svg { flex: 0 0 auto; }
 .auth-success p { margin: 4px 0 0; color: #276658; font-size: 13px; line-height: 1.5; }
-.development-link { padding: 15px; border: 1px dashed #93c5fd; border-radius: 12px; color: #1e3a8a; background: #eff6ff; }
-.development-link p { margin: 5px 0 12px; font-size: 12px; line-height: 1.5; }
 @keyframes spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }

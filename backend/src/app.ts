@@ -172,6 +172,7 @@ export function createCareerBridgeApp(options: AppOptions = {}) {
   const db = options.db ?? ownedDb!.db;
   const passid = options.passidClient ?? createPassidClient(env);
   const app = new Hono();
+  const passwordResetTestMode = env.PASSWORD_RESET_TEST_MODE && env.PASSID_ENVIRONMENT === "sandbox";
 
   function consumeRateLimit(action: string, key: string, limit: number, windowMs: number): { allowed: boolean; retryAfterSeconds: number } {
     const cutoff = now() - windowMs;
@@ -261,7 +262,8 @@ export function createCareerBridgeApp(options: AppOptions = {}) {
     service: "careerbridge",
     passidEnvironment: env.PASSID_ENVIRONMENT,
     approvedScopes: APPROVED_SCOPES,
-    passwordResetAvailable: env.NODE_ENV !== "production" || Boolean(env.RESEND_API_KEY && env.PASSWORD_RESET_EMAIL_FROM),
+    passwordResetAvailable: passwordResetTestMode || env.NODE_ENV !== "production" || Boolean(env.RESEND_API_KEY && env.PASSWORD_RESET_EMAIL_FROM),
+    passwordResetTestMode,
   }));
   app.get("/api/admin/environment", async (c) => {
     const user = await requireUser(c, ["admin"]);
@@ -333,7 +335,7 @@ export function createCareerBridgeApp(options: AppOptions = {}) {
   });
 
   app.post("/api/auth/password/forgot", async (c) => {
-    if (env.NODE_ENV === "production" && (!env.RESEND_API_KEY || !env.PASSWORD_RESET_EMAIL_FROM)) {
+    if (!passwordResetTestMode && env.NODE_ENV === "production" && (!env.RESEND_API_KEY || !env.PASSWORD_RESET_EMAIL_FROM)) {
       return c.json({ error: "password_reset_unavailable", message: "Password recovery is temporarily unavailable. Contact CareerBridge support." }, 503);
     }
     const parsed = z.object({ email: z.string().trim().email().max(254) }).safeParse(await c.req.json().catch(() => null));
@@ -349,7 +351,8 @@ export function createCareerBridgeApp(options: AppOptions = {}) {
 
     const user = db.prepare("SELECT id,email,suspended_at FROM users WHERE email=?").get(email) as any;
     let developmentResetUrl: string | undefined;
-    if (user && !user.suspended_at) {
+    const directTestEligible = passwordResetTestMode && user?.email.endsWith(".test");
+    if (user && !user.suspended_at && (!passwordResetTestMode || directTestEligible)) {
       const token = randomId("cbrst");
       const tokenHash = hmac(token, env.SESSION_SECRET);
       const tokenId = randomId("reset");
@@ -361,9 +364,9 @@ export function createCareerBridgeApp(options: AppOptions = {}) {
           .run(tokenId, user.id, tokenHash, hmac(clientAddress(c), env.SESSION_SECRET), timestamp + 1000 * 60 * 30, timestamp);
         audit(db, user.id, "auth.password_reset.request", "user", user.id, {});
       })();
-      if (env.NODE_ENV !== "production") developmentResetUrl = resetUrl;
-      const delivered = await deliverPasswordResetEmail(env, user.email, resetUrl, tokenId);
-      if (env.NODE_ENV === "production" && !delivered) {
+      if (passwordResetTestMode || env.NODE_ENV !== "production") developmentResetUrl = resetUrl;
+      const delivered = passwordResetTestMode ? true : await deliverPasswordResetEmail(env, user.email, resetUrl, tokenId);
+      if (!passwordResetTestMode && env.NODE_ENV === "production" && !delivered) {
         audit(db, user.id, "auth.password_reset.delivery_failed", "user", user.id, {});
       }
     }
@@ -371,7 +374,7 @@ export function createCareerBridgeApp(options: AppOptions = {}) {
     return c.json({
       ok: true,
       message: "If an eligible CareerBridge account matches that email, a password reset link will be sent.",
-      ...(developmentResetUrl ? { development_reset_url: developmentResetUrl } : {}),
+      ...(developmentResetUrl ? { test_reset_url: developmentResetUrl } : {}),
     }, 202);
   });
 

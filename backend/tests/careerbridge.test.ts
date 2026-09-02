@@ -25,6 +25,7 @@ const baseEnv: CareerBridgeEnv = {
   PASSID_PAY_PREVIEW_ENABLED: true,
   RESEND_API_KEY: "",
   PASSWORD_RESET_EMAIL_FROM: "",
+  PASSWORD_RESET_TEST_MODE: false,
 };
 
 describe("PKCE secret handling", () => {
@@ -266,7 +267,7 @@ describe("CareerBridge independent PASSID institution app", () => {
     expect(unknown.status).toBe(202);
     const unknownBody = await unknown.json() as any;
     expect(unknownBody.message).toContain("If an eligible");
-    expect(unknownBody.development_reset_url).toBeUndefined();
+    expect(unknownBody.test_reset_url).toBeUndefined();
 
     const existingSession = await login(app, "amara@careerbridge.test");
     const forgot = await app.request("/api/auth/password/forgot", {
@@ -276,7 +277,7 @@ describe("CareerBridge independent PASSID institution app", () => {
     });
     expect(forgot.status).toBe(202);
     const forgotBody = await forgot.json() as any;
-    const resetUrl = new URL(forgotBody.development_reset_url);
+    const resetUrl = new URL(forgotBody.test_reset_url);
     const token = resetUrl.searchParams.get("token")!;
     expect(token).toStartWith("cbrst_");
     expect(JSON.stringify(db.prepare("SELECT * FROM password_reset_tokens").get())).not.toContain(token);
@@ -335,6 +336,32 @@ describe("CareerBridge independent PASSID institution app", () => {
     });
     expect(forgot.status).toBe(503);
     expect((await forgot.json() as any).error).toBe("password_reset_unavailable");
+  });
+
+  it("supports direct password testing in production sandbox mode without sending email", async () => {
+    const sandbox = createCareerBridgeApp({
+      env: { ...baseEnv, NODE_ENV: "production", PASSWORD_RESET_TEST_MODE: true, RESEND_API_KEY: "", PASSWORD_RESET_EMAIL_FROM: "" },
+      db,
+      passidClient: mockPassid(),
+    }).app;
+    const config = await sandbox.request("/api/config");
+    expect((await config.json() as any).passwordResetTestMode).toBe(true);
+    const forgot = await sandbox.request("/api/auth/password/forgot", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: "amara@careerbridge.test" }),
+    });
+    expect(forgot.status).toBe(202);
+    expect((await forgot.json() as any).test_reset_url).toContain("/reset-password?token=");
+
+    db.prepare("INSERT INTO users (id,email,password_hash,role,name,email_verified,created_at) VALUES ('real_email_user','real@example.com','pbkdf2$demo$demo','candidate','Real Email',1,?)").run(Date.now());
+    const realEmail = await sandbox.request("/api/auth/password/forgot", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: "real@example.com" }),
+    });
+    expect(realEmail.status).toBe(202);
+    expect((await realEmail.json() as any).test_reset_url).toBeUndefined();
   });
 
   it("never accepts development demo passwords in production", async () => {
