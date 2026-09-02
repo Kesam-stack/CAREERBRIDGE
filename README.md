@@ -85,7 +85,7 @@ PASSID_ENVIRONMENT=sandbox
 PASSID_REDIRECT_URL=
 PASSID_WEBHOOK_URL=
 PASSID_PAY_PREVIEW_ENABLED=true
-PASSWORD_RESET_TEST_MODE=true
+PASSWORD_RESET_TEST_MODE=true # optional; defaults to true in PASSID sandbox mode
 RESEND_API_KEY=
 PASSWORD_RESET_EMAIL_FROM="CareerBridge <security@your-domain.example>"
 APP_URL=
@@ -95,7 +95,7 @@ SESSION_SECRET=
 ENCRYPTION_KEY=
 ```
 
-Password-reset tokens are one-time, expire after 30 minutes, and revoke all existing sessions when used. For a test deployment, set `PASSWORD_RESET_TEST_MODE=true` with `PASSID_ENVIRONMENT=sandbox`; entering one of the synthetic `@careerbridge.test` demo accounts goes directly to the password form without sending email. Direct reset is never issued for ordinary registered addresses, and test mode is rejected in live environments. For production recovery, disable test mode and configure `RESEND_API_KEY` plus a verified sender in `PASSWORD_RESET_EMAIL_FROM`. Without either delivery method, the application still starts but reset requests return `503 password_reset_unavailable`.
+Password-reset tokens are one-time, expire after 30 minutes, and revoke all existing sessions when used. When `PASSID_ENVIRONMENT=sandbox`, direct test mode is enabled by default: one form changes the password immediately for synthetic `@careerbridge.test` demo accounts without sending email. Set `PASSWORD_RESET_TEST_MODE=false` to disable it. Direct reset is never issued for ordinary registered addresses, and test mode is rejected in live environments. For production recovery, configure `RESEND_API_KEY` plus a verified sender in `PASSWORD_RESET_EMAIL_FROM`.
 
 For approved live access, set `PASSID_CONNECT_BASE=https://api.passid.io/v1/connect`. `PASSID_ENVIRONMENT=live` rejects `sk_test_` keys, and sandbox mode rejects live keys or the production Connect URL. The older `PASSID_API_BASE_URL` and `PASSID_SECRET_KEY` names remain supported during migration.
 

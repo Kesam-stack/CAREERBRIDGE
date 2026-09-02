@@ -128,7 +128,9 @@ export function loadEnv(source: Record<string, string | undefined> = process.env
     PASSID_PAY_PREVIEW_ENABLED: read(source, "PASSID_PAY_PREVIEW_ENABLED").toLowerCase() !== "false",
     RESEND_API_KEY: read(source, "RESEND_API_KEY"),
     PASSWORD_RESET_EMAIL_FROM: read(source, "PASSWORD_RESET_EMAIL_FROM"),
-    PASSWORD_RESET_TEST_MODE: read(source, "PASSWORD_RESET_TEST_MODE").toLowerCase() === "true",
+    PASSWORD_RESET_TEST_MODE: read(source, "PASSWORD_RESET_TEST_MODE")
+      ? read(source, "PASSWORD_RESET_TEST_MODE").toLowerCase() === "true"
+      : passidEnvironment === "sandbox",
   };
 }
 

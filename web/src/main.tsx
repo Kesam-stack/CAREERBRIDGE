@@ -294,13 +294,22 @@ function Login({ auth }: { auth: any }) {
 }
 
 function ForgotPassword() {
-  const navigate = useNavigate();
   const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [testMode, setTestMode] = useState<boolean | null>(null);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  useEffect(() => {
+    api("/api/config")
+      .then((response) => response.json())
+      .then((body) => setTestMode(Boolean(body.passwordResetTestMode)))
+      .catch(() => setTestMode(false));
+  }, []);
   async function submit(e: React.FormEvent) {
     e.preventDefault();
+    if (testMode && password !== confirmPassword) return setError("Passwords do not match.");
     setSubmitting(true);
     setError("");
     setMessage("");
@@ -308,12 +317,16 @@ function ForgotPassword() {
       const res = await api("/api/auth/password/forgot", { method: "POST", body: JSON.stringify({ email }) });
       const body = await res.json();
       if (!res.ok) throw new Error(body.error === "password_reset_rate_limited" ? "Too many reset requests. Please wait before trying again." : body.message ?? "Unable to request a reset link.");
-      if (body.test_reset_url) {
+      if (testMode) {
+        if (!body.test_reset_url) throw new Error("Direct reset is available only for a synthetic CareerBridge demo account.");
         const resetUrl = new URL(body.test_reset_url, window.location.origin);
-        if (resetUrl.pathname === "/reset-password") {
-          navigate(`${resetUrl.pathname}${resetUrl.search}`, { replace: true });
-          return;
-        }
+        const token = resetUrl.searchParams.get("token");
+        if (!token) throw new Error("CareerBridge could not create a secure test reset.");
+        const resetResponse = await api("/api/auth/password/reset", { method: "POST", body: JSON.stringify({ token, password }) });
+        const resetBody = await resetResponse.json();
+        if (!resetResponse.ok) throw new Error(resetBody.error === "password_reuse_not_allowed" ? "Choose a password you have not already used." : authErrorMessage(resetBody, "Unable to change the password."));
+        setMessage("Password changed. All previous sessions have been signed out.");
+        return;
       }
       setMessage(body.message);
     } catch (err) {
@@ -322,12 +335,16 @@ function ForgotPassword() {
       setSubmitting(false);
     }
   }
-  return <AuthCard title="Reset your password" onSubmit={submit} error={error}>
-    <p className="auth-intro">Enter the email attached to your CareerBridge account. Reset links expire after 30 minutes and can be used only once.</p>
+  return <AuthCard title={testMode ? "Change demo password" : "Reset your password"} onSubmit={submit} error={error}>
+    {testMode === null ? <LoadingBlock text="Preparing secure password recovery" /> : <p className="auth-intro">{testMode ? "Sandbox testing only. Enter a synthetic CareerBridge demo account and choose its new password now—no email is sent." : "Enter the email attached to your CareerBridge account. Reset links expire after 30 minutes and can be used only once."}</p>}
     {!message ? <>
-      <label>Email address<input value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@example.com" type="email" autoComplete="email" required /></label>
-      <button className="button" type="submit" disabled={submitting}>{submitting ? "Sending securely…" : "Send reset link"}</button>
-    </> : <div className="auth-success" role="status"><CheckCircle2 size={22} /><div><strong>Check your email</strong><p>{message}</p></div></div>}
+      <label>{testMode ? "Demo account email" : "Email address"}<input value={email} onChange={(e) => setEmail(e.target.value)} placeholder={testMode ? "amara@careerbridge.test" : "you@example.com"} type="email" autoComplete="email" required /></label>
+      {testMode && <>
+        <label>New password<input value={password} onChange={(e) => setPassword(e.target.value)} type="password" autoComplete="new-password" required minLength={12} maxLength={128} placeholder="12+ characters, upper/lowercase and number" /></label>
+        <label>Confirm new password<input value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)} type="password" autoComplete="new-password" required minLength={12} maxLength={128} /></label>
+      </>}
+      <button className="button" type="submit" disabled={submitting || testMode === null}>{submitting ? (testMode ? "Changing password…" : "Sending securely…") : (testMode ? "Change password now" : "Send reset link")}</button>
+    </> : <><div className="auth-success" role="status"><CheckCircle2 size={22} /><div><strong>{testMode ? "Password changed" : "Check your email"}</strong><p>{message}</p></div></div>{testMode && <Link className="button" to="/login">Log in with new password</Link>}</>}
     <p className="auth-link-row"><Link to="/login">← Back to login</Link></p>
   </AuthCard>;
 }

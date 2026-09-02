@@ -44,6 +44,16 @@ describe("CareerBridge production environment validation", () => {
       .toContain("PASSWORD_RESET_TEST_MODE: can only be enabled with PASSID_ENVIRONMENT=sandbox");
   });
 
+  it("defaults direct demo password testing on only in sandbox", () => {
+    const sandbox = loadEnv({
+      NODE_ENV: "development",
+      PASSID_ENVIRONMENT: "sandbox",
+      PASSWORD_RESET_TEST_MODE: undefined,
+    });
+    expect(sandbox.PASSWORD_RESET_TEST_MODE).toBe(true);
+    expect(loadEnv({ NODE_ENV: "development", PASSID_ENVIRONMENT: "sandbox", PASSWORD_RESET_TEST_MODE: "false" }).PASSWORD_RESET_TEST_MODE).toBe(false);
+  });
+
   it("rejects a sandbox Connect base URL in live mode", () => {
     const issues = getEnvironmentIssues({ ...complete, PASSID_API_BASE_URL: "https://api.passid.io/api/sandbox/connect" });
     expect(issues).toContain("PASSID_API_BASE_URL: sandbox Connect URL cannot be used in live mode");
