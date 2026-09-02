@@ -1,5 +1,5 @@
 const base = process.env.CAREERBRIDGE_BASE_URL || "http://127.0.0.1:5174";
-const routes = ["/", "/login", "/jobs", "/verification", "/pay", "/employer/dashboard", "/admin/passid"];
+const routes = ["/", "/login", "/forgot-password", "/reset-password", "/jobs", "/verification", "/pay", "/employer/dashboard", "/admin/passid"];
 const failures = [];
 
 for (const route of routes) {

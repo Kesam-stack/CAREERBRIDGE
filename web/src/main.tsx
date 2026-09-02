@@ -127,6 +127,8 @@ function App() {
           <Route path="/" element={<Landing auth={value} />} />
           <Route path="/signup" element={<Signup auth={value} />} />
           <Route path="/login" element={<Login auth={value} />} />
+          <Route path="/forgot-password" element={<ForgotPassword />} />
+          <Route path="/reset-password" element={<ResetPassword />} />
           <Route path="/dashboard" element={<CandidateDashboard auth={value} />} />
           <Route path="/profile" element={<Profile auth={value} />} />
           <Route path="/jobs" element={<Jobs auth={value} />} />
@@ -285,8 +287,90 @@ function Login({ auth }: { auth: any }) {
   return <AuthCard title="Log in" onSubmit={submit} error={error}>
     <input value={email} onChange={(e) => setEmail(e.target.value)} placeholder="Email" />
     <input value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Password" type="password" />
+    <div className="form-assist"><Link to="/forgot-password">Forgot password?</Link></div>
     <button className="button" type="submit">Log in</button>
     <p className="auth-link-row">No account yet? <Link to="/signup">Create one now</Link></p>
+  </AuthCard>;
+}
+
+function ForgotPassword() {
+  const [email, setEmail] = useState("");
+  const [message, setMessage] = useState("");
+  const [error, setError] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [developmentResetUrl, setDevelopmentResetUrl] = useState("");
+  async function submit(e: React.FormEvent) {
+    e.preventDefault();
+    setSubmitting(true);
+    setError("");
+    setMessage("");
+    setDevelopmentResetUrl("");
+    try {
+      const res = await api("/api/auth/password/forgot", { method: "POST", body: JSON.stringify({ email }) });
+      const body = await res.json();
+      if (!res.ok) throw new Error(body.error === "password_reset_rate_limited" ? "Too many reset requests. Please wait before trying again." : body.message ?? "Unable to request a reset link.");
+      setMessage(body.message);
+      setDevelopmentResetUrl(body.development_reset_url ?? "");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to request a reset link.");
+    } finally {
+      setSubmitting(false);
+    }
+  }
+  return <AuthCard title="Reset your password" onSubmit={submit} error={error}>
+    <p className="auth-intro">Enter the email attached to your CareerBridge account. Reset links expire after 30 minutes and can be used only once.</p>
+    {!message ? <>
+      <label>Email address<input value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@example.com" type="email" autoComplete="email" required /></label>
+      <button className="button" type="submit" disabled={submitting}>{submitting ? "Sending securely…" : "Send reset link"}</button>
+    </> : <div className="auth-success" role="status"><CheckCircle2 size={22} /><div><strong>Check your email</strong><p>{message}</p></div></div>}
+    {developmentResetUrl && <div className="development-link"><strong>Local development only</strong><p>Email delivery is replaced with this private test link.</p><a className="button secondary" href={developmentResetUrl}>Open reset link</a></div>}
+    <p className="auth-link-row"><Link to="/login">← Back to login</Link></p>
+  </AuthCard>;
+}
+
+function ResetPassword() {
+  const [params] = useSearchParams();
+  const token = params.get("token") ?? "";
+  const [password, setPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [error, setError] = useState("");
+  const [complete, setComplete] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  async function submit(e: React.FormEvent) {
+    e.preventDefault();
+    setError("");
+    if (!token) return setError("This reset link is incomplete. Request a new one.");
+    if (password !== confirmPassword) return setError("Passwords do not match.");
+    setSubmitting(true);
+    try {
+      const res = await api("/api/auth/password/reset", { method: "POST", body: JSON.stringify({ token, password }) });
+      const body = await res.json();
+      if (!res.ok) {
+        const known: Record<string, string> = {
+          invalid_or_expired_reset_token: "This reset link is invalid, expired, or has already been used.",
+          password_reuse_not_allowed: "Choose a password you have not already used.",
+          password_reset_rate_limited: "Too many reset attempts. Please wait and try again.",
+        };
+        throw new Error(known[body.error] ?? authErrorMessage(body, "Unable to reset the password."));
+      }
+      setComplete(true);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Unable to reset the password.");
+    } finally {
+      setSubmitting(false);
+    }
+  }
+  return <AuthCard title={complete ? "Password updated" : "Choose a new password"} onSubmit={submit} error={error}>
+    {complete ? <>
+      <div className="auth-success" role="status"><CheckCircle2 size={22} /><div><strong>Your account is secure</strong><p>All previous CareerBridge sessions were signed out.</p></div></div>
+      <Link className="button" to="/login">Continue to login</Link>
+    </> : <>
+      <p className="auth-intro">Use at least 12 characters with uppercase, lowercase, and a number. Completing this reset signs out every existing session.</p>
+      <label>New password<input value={password} onChange={(e) => setPassword(e.target.value)} type="password" autoComplete="new-password" required minLength={12} maxLength={128} /></label>
+      <label>Confirm new password<input value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)} type="password" autoComplete="new-password" required minLength={12} maxLength={128} /></label>
+      <button className="button" type="submit" disabled={submitting || !token}>{submitting ? "Updating password…" : "Update password"}</button>
+      {!token && <div className="notice">This reset link is missing its secure token. <Link to="/forgot-password">Request a new link.</Link></div>}
+    </>}
   </AuthCard>;
 }
 

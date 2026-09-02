@@ -142,6 +142,30 @@ async function serveCareerBridgeWeb(c: any) {
   });
 }
 
+async function deliverPasswordResetEmail(env: CareerBridgeEnv, email: string, resetUrl: string, deliveryId: string): Promise<boolean> {
+  if (!env.RESEND_API_KEY || !env.PASSWORD_RESET_EMAIL_FROM) return false;
+  try {
+    const response = await fetch("https://api.resend.com/emails", {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${env.RESEND_API_KEY}`,
+        "Content-Type": "application/json",
+        "Idempotency-Key": deliveryId,
+        "User-Agent": "CareerBridge/1.0",
+      },
+      body: JSON.stringify({
+        from: env.PASSWORD_RESET_EMAIL_FROM,
+        to: [email],
+        subject: "Reset your CareerBridge password",
+        text: `We received a request to reset your CareerBridge password. Use this secure link within 30 minutes:\n\n${resetUrl}\n\nIf you did not request this, you can ignore this email. Your password has not changed.`,
+      }),
+    });
+    return response.ok;
+  } catch {
+    return false;
+  }
+}
+
 export function createCareerBridgeApp(options: AppOptions = {}) {
   const env = options.env ?? loadEnv();
   const ownedDb = options.db ? null : openCareerBridgeDb(env.DATABASE_URL);
@@ -305,6 +329,77 @@ export function createCareerBridgeApp(options: AppOptions = {}) {
     const { csrf } = createUserSession(c, user);
     audit(db, user.id, "auth.login", "user", user.id, {});
     return c.json({ user: publicUser(user), csrf });
+  });
+
+  app.post("/api/auth/password/forgot", async (c) => {
+    const parsed = z.object({ email: z.string().trim().email().max(254) }).safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) return c.json({ error: "invalid_email", message: "Enter a valid email address." }, 400);
+    const email = parsed.data.email.toLowerCase();
+    const networkLimit = consumeRateLimit("password_reset_network", clientAddress(c), 12, 1000 * 60 * 60);
+    const accountLimit = consumeRateLimit("password_reset_account", email, 5, 1000 * 60 * 60);
+    if (!networkLimit.allowed || !accountLimit.allowed) {
+      const retryAfterSeconds = Math.max(networkLimit.retryAfterSeconds, accountLimit.retryAfterSeconds);
+      c.header("Retry-After", String(retryAfterSeconds));
+      return c.json({ error: "password_reset_rate_limited", retry_after_seconds: retryAfterSeconds }, 429);
+    }
+
+    const user = db.prepare("SELECT id,email,suspended_at FROM users WHERE email=?").get(email) as any;
+    let developmentResetUrl: string | undefined;
+    if (user && !user.suspended_at) {
+      const token = randomId("cbrst");
+      const tokenHash = hmac(token, env.SESSION_SECRET);
+      const tokenId = randomId("reset");
+      const resetUrl = `${env.APP_URL}/reset-password?token=${encodeURIComponent(token)}`;
+      const timestamp = now();
+      db.transaction(() => {
+        db.prepare("UPDATE password_reset_tokens SET used_at=? WHERE user_id=? AND used_at IS NULL").run(timestamp, user.id);
+        db.prepare("INSERT INTO password_reset_tokens (id,user_id,token_hash,requested_from_hash,expires_at,created_at) VALUES (?,?,?,?,?,?)")
+          .run(tokenId, user.id, tokenHash, hmac(clientAddress(c), env.SESSION_SECRET), timestamp + 1000 * 60 * 30, timestamp);
+        audit(db, user.id, "auth.password_reset.request", "user", user.id, {});
+      })();
+      if (env.NODE_ENV !== "production") developmentResetUrl = resetUrl;
+      const delivered = await deliverPasswordResetEmail(env, user.email, resetUrl, tokenId);
+      if (env.NODE_ENV === "production" && !delivered) {
+        audit(db, user.id, "auth.password_reset.delivery_failed", "user", user.id, {});
+      }
+    }
+
+    return c.json({
+      ok: true,
+      message: "If an eligible CareerBridge account matches that email, a password reset link will be sent.",
+      ...(developmentResetUrl ? { development_reset_url: developmentResetUrl } : {}),
+    }, 202);
+  });
+
+  app.post("/api/auth/password/reset", async (c) => {
+    const resetLimit = consumeRateLimit("password_reset_attempt", clientAddress(c), 20, 1000 * 60 * 60);
+    if (!resetLimit.allowed) {
+      c.header("Retry-After", String(resetLimit.retryAfterSeconds));
+      return c.json({ error: "password_reset_rate_limited", retry_after_seconds: resetLimit.retryAfterSeconds }, 429);
+    }
+    const parsed = z.object({
+      token: z.string().min(20).max(200),
+      password: z.string().min(12).max(128)
+        .regex(/[a-z]/, "password_requires_lowercase")
+        .regex(/[A-Z]/, "password_requires_uppercase")
+        .regex(/[0-9]/, "password_requires_number"),
+    }).safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) return c.json({ error: "invalid_password_reset", fields: parsed.error.flatten().fieldErrors }, 400);
+    const tokenHash = hmac(parsed.data.token, env.SESSION_SECRET);
+    const reset = db.prepare(`SELECT prt.id,prt.user_id,u.password_hash,u.suspended_at FROM password_reset_tokens prt
+      JOIN users u ON u.id=prt.user_id WHERE prt.token_hash=? AND prt.used_at IS NULL AND prt.expires_at>?`).get(tokenHash, now()) as any;
+    if (!reset || reset.suspended_at) return c.json({ error: "invalid_or_expired_reset_token" }, 400);
+    const demoPasswordReuse = reset.password_hash === "pbkdf2$demo$demo" && parsed.data.password === "CareerBridgeDemo!2026";
+    if (demoPasswordReuse || verifyPassword(parsed.data.password, reset.password_hash)) return c.json({ error: "password_reuse_not_allowed" }, 400);
+    const timestamp = now();
+    db.transaction(() => {
+      db.prepare("UPDATE users SET password_hash=? WHERE id=?").run(hashPassword(parsed.data.password), reset.user_id);
+      db.prepare("UPDATE password_reset_tokens SET used_at=? WHERE user_id=? AND used_at IS NULL").run(timestamp, reset.user_id);
+      db.prepare("DELETE FROM sessions WHERE user_id=?").run(reset.user_id);
+      audit(db, reset.user_id, "auth.password_reset.complete", "user", reset.user_id, { sessions_revoked: true });
+    })();
+    deleteCookie(c, "cb_session", { path: "/" });
+    return c.json({ ok: true, message: "Password updated. Sign in with your new password." });
   });
 
   app.post("/api/auth/logout", async (c) => {

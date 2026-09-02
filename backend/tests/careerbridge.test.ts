@@ -23,6 +23,8 @@ const baseEnv: CareerBridgeEnv = {
   PASSID_REDIRECT_URL: "https://api.careerbridge.test/api/passid/callback",
   PASSID_WEBHOOK_URL: "https://api.careerbridge.test/api/webhooks/passid",
   PASSID_PAY_PREVIEW_ENABLED: true,
+  RESEND_API_KEY: "",
+  PASSWORD_RESET_EMAIL_FROM: "",
 };
 
 describe("PKCE secret handling", () => {
@@ -253,6 +255,67 @@ describe("CareerBridge independent PASSID institution app", () => {
     });
     expect(legacyVerify.status).toBe(404);
     expect(db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='auth_otps'").get()).toBeNull();
+  });
+
+  it("resets passwords with a hashed, expiring, one-time token and revokes existing sessions", async () => {
+    const unknown = await app.request("/api/auth/password/forgot", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: "missing@careerbridge.test" }),
+    });
+    expect(unknown.status).toBe(202);
+    const unknownBody = await unknown.json() as any;
+    expect(unknownBody.message).toContain("If an eligible");
+    expect(unknownBody.development_reset_url).toBeUndefined();
+
+    const existingSession = await login(app, "amara@careerbridge.test");
+    const forgot = await app.request("/api/auth/password/forgot", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "X-Real-IP": "203.0.113.42" },
+      body: JSON.stringify({ email: "AMARA@careerbridge.test" }),
+    });
+    expect(forgot.status).toBe(202);
+    const forgotBody = await forgot.json() as any;
+    const resetUrl = new URL(forgotBody.development_reset_url);
+    const token = resetUrl.searchParams.get("token")!;
+    expect(token).toStartWith("cbrst_");
+    expect(JSON.stringify(db.prepare("SELECT * FROM password_reset_tokens").get())).not.toContain(token);
+
+    const weak = await app.request("/api/auth/password/reset", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ token, password: "weak" }),
+    });
+    expect(weak.status).toBe(400);
+
+    const reset = await app.request("/api/auth/password/reset", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ token, password: "A-New-CareerBridge-Password-2026" }),
+    });
+    expect(reset.status).toBe(200);
+    expect((await reset.json() as any).ok).toBe(true);
+
+    const reused = await app.request("/api/auth/password/reset", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ token, password: "Another-Password-For-2026" }),
+    });
+    expect(reused.status).toBe(400);
+    expect((await reused.json() as any).error).toBe("invalid_or_expired_reset_token");
+
+    const revokedSession = await app.request("/api/auth/me", { headers: { Cookie: existingSession.cookie } });
+    expect(await revokedSession.json()).toEqual({ user: null });
+    const oldPassword = await app.request("/api/auth/login", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: "amara@careerbridge.test", password: "CareerBridgeDemo!2026" }),
+    });
+    expect(oldPassword.status).toBe(401);
+    const newPassword = await app.request("/api/auth/login", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: "amara@careerbridge.test", password: "A-New-CareerBridge-Password-2026" }),
+    });
+    expect(newPassword.status).toBe(200);
   });
 
   it("never accepts development demo passwords in production", async () => {

@@ -16,6 +16,8 @@ export interface CareerBridgeEnv {
   PASSID_REDIRECT_URL: string;
   PASSID_WEBHOOK_URL: string;
   PASSID_PAY_PREVIEW_ENABLED: boolean;
+  RESEND_API_KEY: string;
+  PASSWORD_RESET_EMAIL_FROM: string;
 }
 
 const PLACEHOLDER = /^(changeme|change-me|placeholder|secret|test|todo|example)$/i;
@@ -75,6 +77,10 @@ export function getEnvironmentIssues(source: Record<string, string | undefined> 
   requireValue(normalized, "PASSID_WEBHOOK_SECRET", issues, production ? 24 : 8);
   requireHttpsUrl(normalized, "PASSID_REDIRECT_URL", issues);
   requireHttpsUrl(normalized, "PASSID_WEBHOOK_URL", issues);
+  if (production) {
+    requireValue(normalized, "RESEND_API_KEY", issues, 10);
+    requireValue(normalized, "PASSWORD_RESET_EMAIL_FROM", issues, 5);
+  }
 
   const env = read(normalized, "PASSID_ENVIRONMENT");
   if (env !== "sandbox" && env !== "live") issues.push("PASSID_ENVIRONMENT: must be sandbox or live");
@@ -121,6 +127,8 @@ export function loadEnv(source: Record<string, string | undefined> = process.env
     PASSID_REDIRECT_URL: read(source, "PASSID_REDIRECT_URL") || "http://localhost:4100/api/passid/callback",
     PASSID_WEBHOOK_URL: read(source, "PASSID_WEBHOOK_URL") || "http://localhost:4100/api/webhooks/passid",
     PASSID_PAY_PREVIEW_ENABLED: read(source, "PASSID_PAY_PREVIEW_ENABLED").toLowerCase() !== "false",
+    RESEND_API_KEY: read(source, "RESEND_API_KEY"),
+    PASSWORD_RESET_EMAIL_FROM: read(source, "PASSWORD_RESET_EMAIL_FROM"),
   };
 }
 

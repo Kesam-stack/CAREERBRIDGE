@@ -49,6 +49,16 @@ export function migrate(db: Database): void {
     )
   `);
   db.run(`CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id), csrf TEXT NOT NULL, expires_at INTEGER NOT NULL, created_at INTEGER NOT NULL)`);
+  db.run(`CREATE TABLE IF NOT EXISTS password_reset_tokens (
+    id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id),
+    token_hash TEXT NOT NULL UNIQUE,
+    requested_from_hash TEXT NOT NULL,
+    expires_at INTEGER NOT NULL,
+    used_at INTEGER,
+    created_at INTEGER NOT NULL
+  )`);
+  db.run("CREATE INDEX IF NOT EXISTS idx_password_reset_lookup ON password_reset_tokens(token_hash,expires_at,used_at)");
   // OTP login has been retired. Remove the legacy challenge table (and any
   // short-lived codes it contained) when upgrading an existing database.
   db.run(`DROP TABLE IF EXISTS auth_otps`);

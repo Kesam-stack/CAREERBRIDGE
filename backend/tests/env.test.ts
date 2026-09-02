@@ -16,6 +16,8 @@ describe("CareerBridge production environment validation", () => {
     PASSID_ENVIRONMENT: "live",
     PASSID_REDIRECT_URL: "https://api.careerbridge.example/api/passid/callback",
     PASSID_WEBHOOK_URL: "https://api.careerbridge.example/api/webhooks/passid",
+    RESEND_API_KEY: "re_test_careerbridge_delivery",
+    PASSWORD_RESET_EMAIL_FROM: "CareerBridge <security@careerbridge.example>",
   };
 
   it("accepts complete live configuration without exposing values", () => {
@@ -31,6 +33,12 @@ describe("CareerBridge production environment validation", () => {
   it("requires HTTPS URLs in production", () => {
     const issues = getEnvironmentIssues({ ...complete, APP_URL: "http://careerbridge.example" });
     expect(issues).toContain("APP_URL: must use https in production");
+  });
+
+  it("requires production password-reset email delivery", () => {
+    const issues = getEnvironmentIssues({ ...complete, RESEND_API_KEY: "", PASSWORD_RESET_EMAIL_FROM: "" });
+    expect(issues).toContain("RESEND_API_KEY: missing");
+    expect(issues).toContain("PASSWORD_RESET_EMAIL_FROM: missing");
   });
 
   it("rejects a sandbox Connect base URL in live mode", () => {
