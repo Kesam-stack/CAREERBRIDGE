@@ -319,6 +319,36 @@ describe("CareerBridge independent PASSID institution app", () => {
     expect(newPassword.status).toBe(200);
   });
 
+  it("changes seeded demo passwords directly without email or reset links", async () => {
+    const existingSession = await login(app, "recruiter@careerbridge.test", "employer");
+    const changed = await app.request("/api/auth/password/demo-change", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: "recruiter@careerbridge.test", password: "Direct-Demo-Password-2026" }),
+    });
+    expect(changed.status).toBe(200);
+    const body = await changed.json() as any;
+    expect(body.ok).toBe(true);
+    expect(JSON.stringify(body)).not.toContain("token");
+    expect(JSON.stringify(body)).not.toContain("reset");
+    expect((await app.request("/api/auth/me", { headers: { Cookie: existingSession.cookie } })).status).toBe(200);
+    expect(await (await app.request("/api/auth/me", { headers: { Cookie: existingSession.cookie } })).json()).toEqual({ user: null });
+
+    const loginWithNewPassword = await app.request("/api/auth/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: "recruiter@careerbridge.test", password: "Direct-Demo-Password-2026" }),
+    });
+    expect(loginWithNewPassword.status).toBe(200);
+
+    const nonDemo = await app.request("/api/auth/password/demo-change", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: "someone@example.com", password: "Direct-Demo-Password-2026" }),
+    });
+    expect(nonDemo.status).toBe(404);
+  });
+
   it("starts in production without an email provider and degrades password recovery safely", async () => {
     const production = createCareerBridgeApp({
       env: { ...baseEnv, NODE_ENV: "production", RESEND_API_KEY: "", PASSWORD_RESET_EMAIL_FROM: "" },

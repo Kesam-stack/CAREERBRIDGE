@@ -264,6 +264,7 @@ export function createCareerBridgeApp(options: AppOptions = {}) {
     approvedScopes: APPROVED_SCOPES,
     passwordResetAvailable: passwordResetTestMode || env.NODE_ENV !== "production" || Boolean(env.RESEND_API_KEY && env.PASSWORD_RESET_EMAIL_FROM),
     passwordResetTestMode,
+    demoPasswordChangeAvailable: true,
   }));
   app.get("/api/admin/environment", async (c) => {
     const user = await requireUser(c, ["admin"]);
@@ -332,6 +333,38 @@ export function createCareerBridgeApp(options: AppOptions = {}) {
     const { csrf } = createUserSession(c, user);
     audit(db, user.id, "auth.login", "user", user.id, {});
     return c.json({ user: publicUser(user), csrf });
+  });
+
+  app.post("/api/auth/password/demo-change", async (c) => {
+    const parsed = z.object({
+      email: z.string().trim().email().max(254),
+      password: z.string().min(12).max(128)
+        .regex(/[a-z]/, "password_requires_lowercase")
+        .regex(/[A-Z]/, "password_requires_uppercase")
+        .regex(/[0-9]/, "password_requires_number"),
+    }).safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) return c.json({ error: "invalid_demo_password_change", fields: parsed.error.flatten().fieldErrors }, 400);
+    const networkLimit = consumeRateLimit("demo_password_change_network", clientAddress(c), 20, 1000 * 60 * 60);
+    const accountLimit = consumeRateLimit("demo_password_change_account", parsed.data.email.toLowerCase(), 10, 1000 * 60 * 60);
+    if (!networkLimit.allowed || !accountLimit.allowed) {
+      const retryAfterSeconds = Math.max(networkLimit.retryAfterSeconds, accountLimit.retryAfterSeconds);
+      c.header("Retry-After", String(retryAfterSeconds));
+      return c.json({ error: "password_reset_rate_limited", retry_after_seconds: retryAfterSeconds }, 429);
+    }
+    const demoIds = ["candidate_demo", "employer_demo", "admin_demo"];
+    const user = db.prepare("SELECT id,password_hash,suspended_at FROM users WHERE email=?").get(parsed.data.email.toLowerCase()) as any;
+    if (!user || user.suspended_at || !demoIds.includes(user.id)) return c.json({ error: "demo_account_not_found" }, 404);
+    const demoPasswordReuse = user.password_hash === "pbkdf2$demo$demo" && parsed.data.password === "CareerBridgeDemo!2026";
+    if (demoPasswordReuse || verifyPassword(parsed.data.password, user.password_hash)) return c.json({ error: "password_reuse_not_allowed" }, 400);
+    const timestamp = now();
+    db.transaction(() => {
+      db.prepare("UPDATE users SET password_hash=? WHERE id=?").run(hashPassword(parsed.data.password), user.id);
+      db.prepare("UPDATE password_reset_tokens SET used_at=? WHERE user_id=? AND used_at IS NULL").run(timestamp, user.id);
+      db.prepare("DELETE FROM sessions WHERE user_id=?").run(user.id);
+      audit(db, user.id, "auth.demo_password_change.complete", "user", user.id, { sessions_revoked: true, direct_test: true });
+    })();
+    deleteCookie(c, "cb_session", { path: "/" });
+    return c.json({ ok: true, message: "Demo password changed. Sign in with the new password." });
   });
 
   app.post("/api/auth/password/forgot", async (c) => {

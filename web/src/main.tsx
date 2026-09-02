@@ -128,7 +128,6 @@ function App() {
           <Route path="/signup" element={<Signup auth={value} />} />
           <Route path="/login" element={<Login auth={value} />} />
           <Route path="/forgot-password" element={<ForgotPassword />} />
-          <Route path="/reset-password" element={<ResetPassword />} />
           <Route path="/dashboard" element={<CandidateDashboard auth={value} />} />
           <Route path="/profile" element={<Profile auth={value} />} />
           <Route path="/jobs" element={<Jobs auth={value} />} />
@@ -287,7 +286,7 @@ function Login({ auth }: { auth: any }) {
   return <AuthCard title="Log in" onSubmit={submit} error={error}>
     <input value={email} onChange={(e) => setEmail(e.target.value)} placeholder="Email" />
     <input value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Password" type="password" />
-    <div className="form-assist"><Link to="/forgot-password">Forgot password?</Link></div>
+    <div className="form-assist"><Link to="/forgot-password">Change demo password</Link></div>
     <button className="button" type="submit">Log in</button>
     <p className="auth-link-row">No account yet? <Link to="/signup">Create one now</Link></p>
   </AuthCard>;
@@ -297,101 +296,42 @@ function ForgotPassword() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
-  const [testMode, setTestMode] = useState<boolean | null>(null);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
-  useEffect(() => {
-    api("/api/config")
-      .then((response) => response.json())
-      .then((body) => setTestMode(Boolean(body.passwordResetTestMode)))
-      .catch(() => setTestMode(false));
-  }, []);
   async function submit(e: React.FormEvent) {
     e.preventDefault();
-    if (testMode && password !== confirmPassword) return setError("Passwords do not match.");
+    if (password !== confirmPassword) return setError("Passwords do not match.");
     setSubmitting(true);
     setError("");
     setMessage("");
     try {
-      const res = await api("/api/auth/password/forgot", { method: "POST", body: JSON.stringify({ email }) });
-      const body = await res.json();
-      if (!res.ok) throw new Error(body.error === "password_reset_rate_limited" ? "Too many reset requests. Please wait before trying again." : body.message ?? "Unable to request a reset link.");
-      if (testMode) {
-        if (!body.test_reset_url) throw new Error("Direct reset is available only for a synthetic CareerBridge demo account.");
-        const resetUrl = new URL(body.test_reset_url, window.location.origin);
-        const token = resetUrl.searchParams.get("token");
-        if (!token) throw new Error("CareerBridge could not create a secure test reset.");
-        const resetResponse = await api("/api/auth/password/reset", { method: "POST", body: JSON.stringify({ token, password }) });
-        const resetBody = await resetResponse.json();
-        if (!resetResponse.ok) throw new Error(resetBody.error === "password_reuse_not_allowed" ? "Choose a password you have not already used." : authErrorMessage(resetBody, "Unable to change the password."));
-        setMessage("Password changed. All previous sessions have been signed out.");
-        return;
-      }
-      setMessage(body.message);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Unable to request a reset link.");
-    } finally {
-      setSubmitting(false);
-    }
-  }
-  return <AuthCard title={testMode ? "Change demo password" : "Reset your password"} onSubmit={submit} error={error}>
-    {testMode === null ? <LoadingBlock text="Preparing secure password recovery" /> : <p className="auth-intro">{testMode ? "Sandbox testing only. Enter a synthetic CareerBridge demo account and choose its new password now—no email is sent." : "Enter the email attached to your CareerBridge account. Reset links expire after 30 minutes and can be used only once."}</p>}
-    {!message ? <>
-      <label>{testMode ? "Demo account email" : "Email address"}<input value={email} onChange={(e) => setEmail(e.target.value)} placeholder={testMode ? "amara@careerbridge.test" : "you@example.com"} type="email" autoComplete="email" required /></label>
-      {testMode && <>
-        <label>New password<input value={password} onChange={(e) => setPassword(e.target.value)} type="password" autoComplete="new-password" required minLength={12} maxLength={128} placeholder="12+ characters, upper/lowercase and number" /></label>
-        <label>Confirm new password<input value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)} type="password" autoComplete="new-password" required minLength={12} maxLength={128} /></label>
-      </>}
-      <button className="button" type="submit" disabled={submitting || testMode === null}>{submitting ? (testMode ? "Changing password…" : "Sending securely…") : (testMode ? "Change password now" : "Send reset link")}</button>
-    </> : <><div className="auth-success" role="status"><CheckCircle2 size={22} /><div><strong>{testMode ? "Password changed" : "Check your email"}</strong><p>{message}</p></div></div>{testMode && <Link className="button" to="/login">Log in with new password</Link>}</>}
-    <p className="auth-link-row"><Link to="/login">← Back to login</Link></p>
-  </AuthCard>;
-}
-
-function ResetPassword() {
-  const [params] = useSearchParams();
-  const token = params.get("token") ?? "";
-  const [password, setPassword] = useState("");
-  const [confirmPassword, setConfirmPassword] = useState("");
-  const [error, setError] = useState("");
-  const [complete, setComplete] = useState(false);
-  const [submitting, setSubmitting] = useState(false);
-  async function submit(e: React.FormEvent) {
-    e.preventDefault();
-    setError("");
-    if (!token) return setError("This reset link is incomplete. Request a new one.");
-    if (password !== confirmPassword) return setError("Passwords do not match.");
-    setSubmitting(true);
-    try {
-      const res = await api("/api/auth/password/reset", { method: "POST", body: JSON.stringify({ token, password }) });
+      const res = await api("/api/auth/password/demo-change", { method: "POST", body: JSON.stringify({ email, password }) });
       const body = await res.json();
       if (!res.ok) {
         const known: Record<string, string> = {
-          invalid_or_expired_reset_token: "This reset link is invalid, expired, or has already been used.",
-          password_reuse_not_allowed: "Choose a password you have not already used.",
-          password_reset_rate_limited: "Too many reset attempts. Please wait and try again.",
+          password_reset_rate_limited: "Too many password changes. Please wait before trying again.",
+          demo_account_not_found: "Use one of the listed CareerBridge demo accounts.",
+          password_reuse_not_allowed: "Choose a password different from the current password.",
         };
-        throw new Error(known[body.error] ?? authErrorMessage(body, "Unable to reset the password."));
+        throw new Error(known[body.error] ?? authErrorMessage(body, "Unable to change the demo password."));
       }
-      setComplete(true);
+      setMessage(body.message);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Unable to reset the password.");
+      setError(err instanceof Error ? err.message : "Unable to change the demo password.");
     } finally {
       setSubmitting(false);
     }
   }
-  return <AuthCard title={complete ? "Password updated" : "Choose a new password"} onSubmit={submit} error={error}>
-    {complete ? <>
-      <div className="auth-success" role="status"><CheckCircle2 size={22} /><div><strong>Your account is secure</strong><p>All previous CareerBridge sessions were signed out.</p></div></div>
-      <Link className="button" to="/login">Continue to login</Link>
-    </> : <>
-      <p className="auth-intro">Use at least 12 characters with uppercase, lowercase, and a number. Completing this reset signs out every existing session.</p>
-      <label>New password<input value={password} onChange={(e) => setPassword(e.target.value)} type="password" autoComplete="new-password" required minLength={12} maxLength={128} /></label>
+  return <AuthCard title="Change demo password" onSubmit={submit} error={error}>
+    <p className="auth-intro">Testing tool only. Choose a demo account and change its password immediately. CareerBridge does not send an email or create a reset link.</p>
+    {!message ? <>
+      <label>Demo account<select value={email} onChange={(e) => setEmail(e.target.value)} required><option value="">Choose a demo account</option><option value="amara@careerbridge.test">Amara Osei · Candidate</option><option value="recruiter@careerbridge.test">Maya Patel · Employer</option><option value="admin@careerbridge.test">CareerBridge Admin</option></select></label>
+      <label>New password<input value={password} onChange={(e) => setPassword(e.target.value)} type="password" autoComplete="new-password" required minLength={12} maxLength={128} placeholder="12+ characters, upper/lowercase and number" /></label>
       <label>Confirm new password<input value={confirmPassword} onChange={(e) => setConfirmPassword(e.target.value)} type="password" autoComplete="new-password" required minLength={12} maxLength={128} /></label>
-      <button className="button" type="submit" disabled={submitting || !token}>{submitting ? "Updating password…" : "Update password"}</button>
-      {!token && <div className="notice">This reset link is missing its secure token. <Link to="/forgot-password">Request a new link.</Link></div>}
-    </>}
+      <button className="button" type="submit" disabled={submitting}>{submitting ? "Changing password…" : "Change password now"}</button>
+    </> : <><div className="auth-success" role="status"><CheckCircle2 size={22} /><div><strong>Password changed</strong><p>{message}</p></div></div><Link className="button" to="/login">Log in with new password</Link></>}
+    <p className="auth-link-row"><Link to="/login">← Back to login</Link></p>
   </AuthCard>;
 }
 

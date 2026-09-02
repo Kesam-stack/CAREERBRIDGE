@@ -38,6 +38,7 @@ careerbridge/
 - `POST /api/auth/logout`
 - `POST /api/auth/password/forgot`
 - `POST /api/auth/password/reset`
+- `POST /api/auth/password/demo-change` (seeded demo accounts only; no email or reset link)
 - `GET /api/auth/me`
 - `GET /api/jobs`
 - `GET /api/jobs/:id`
@@ -95,7 +96,7 @@ SESSION_SECRET=
 ENCRYPTION_KEY=
 ```
 
-Password-reset tokens are one-time, expire after 30 minutes, and revoke all existing sessions when used. When `PASSID_ENVIRONMENT=sandbox`, direct test mode is enabled by default: one form changes the password immediately for synthetic `@careerbridge.test` demo accounts without sending email. Set `PASSWORD_RESET_TEST_MODE=false` to disable it. Direct reset is never issued for ordinary registered addresses, and test mode is rejected in live environments. For production recovery, configure `RESEND_API_KEY` plus a verified sender in `PASSWORD_RESET_EMAIL_FROM`.
+The login screen provides a direct password-change form for the three seeded CareerBridge demo accounts. It accepts the demo account, new password, and confirmation in one container; it sends no email and creates no reset link. The endpoint is ID-restricted to `candidate_demo`, `employer_demo`, and `admin_demo`, rate-limited, audited, and revokes existing sessions. The token-based endpoints remain available for future recovery of real registered accounts when email delivery is configured.
 
 For approved live access, set `PASSID_CONNECT_BASE=https://api.passid.io/v1/connect`. `PASSID_ENVIRONMENT=live` rejects `sk_test_` keys, and sandbox mode rejects live keys or the production Connect URL. The older `PASSID_API_BASE_URL` and `PASSID_SECRET_KEY` names remain supported during migration.
 
