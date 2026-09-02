@@ -99,10 +99,6 @@ export function getEnvironmentIssues(source: Record<string, string | undefined> 
     if (env === "live" && payKey.startsWith("pay_test_")) issues.push("PASSID_PAY_SECRET_KEY: sandbox pay keys cannot be used in live mode");
     if (env === "sandbox" && payKey.startsWith("pay_live_")) issues.push("PASSID_PAY_SECRET_KEY: live pay keys cannot be used in sandbox mode");
   }
-  const payEnvironmentOverride = read(normalized, "PASSID_PAY_ENVIRONMENT");
-  if (payEnvironmentOverride && payEnvironmentOverride !== env) {
-    issues.push("PASSID_PAY_ENVIRONMENT: must match PASSID_ENVIRONMENT");
-  }
   const apiBase = read(normalized, "PASSID_API_BASE_URL").replace(/\/+$/, "");
   if (env === "sandbox" && /\/v1\/connect$/.test(apiBase)) {
     issues.push("PASSID_API_BASE_URL: production Connect URL cannot be used in sandbox mode");
