@@ -318,6 +318,25 @@ describe("CareerBridge independent PASSID institution app", () => {
     expect(newPassword.status).toBe(200);
   });
 
+  it("starts in production without an email provider and degrades password recovery safely", async () => {
+    const production = createCareerBridgeApp({
+      env: { ...baseEnv, NODE_ENV: "production", RESEND_API_KEY: "", PASSWORD_RESET_EMAIL_FROM: "" },
+      db,
+      passidClient: mockPassid(),
+    }).app;
+    const health = await production.request("/health");
+    expect(health.status).toBe(200);
+    const config = await production.request("/api/config");
+    expect((await config.json() as any).passwordResetAvailable).toBe(false);
+    const forgot = await production.request("/api/auth/password/forgot", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: "amara@careerbridge.test" }),
+    });
+    expect(forgot.status).toBe(503);
+    expect((await forgot.json() as any).error).toBe("password_reset_unavailable");
+  });
+
   it("never accepts development demo passwords in production", async () => {
     const productionApp = createCareerBridgeApp({ env: { ...baseEnv, NODE_ENV: "production" }, db, passidClient: mockPassid() }).app;
     const response = await productionApp.request("/api/auth/login", {

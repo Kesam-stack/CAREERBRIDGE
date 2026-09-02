@@ -261,6 +261,7 @@ export function createCareerBridgeApp(options: AppOptions = {}) {
     service: "careerbridge",
     passidEnvironment: env.PASSID_ENVIRONMENT,
     approvedScopes: APPROVED_SCOPES,
+    passwordResetAvailable: env.NODE_ENV !== "production" || Boolean(env.RESEND_API_KEY && env.PASSWORD_RESET_EMAIL_FROM),
   }));
   app.get("/api/admin/environment", async (c) => {
     const user = await requireUser(c, ["admin"]);
@@ -332,6 +333,9 @@ export function createCareerBridgeApp(options: AppOptions = {}) {
   });
 
   app.post("/api/auth/password/forgot", async (c) => {
+    if (env.NODE_ENV === "production" && (!env.RESEND_API_KEY || !env.PASSWORD_RESET_EMAIL_FROM)) {
+      return c.json({ error: "password_reset_unavailable", message: "Password recovery is temporarily unavailable. Contact CareerBridge support." }, 503);
+    }
     const parsed = z.object({ email: z.string().trim().email().max(254) }).safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) return c.json({ error: "invalid_email", message: "Enter a valid email address." }, 400);
     const email = parsed.data.email.toLowerCase();

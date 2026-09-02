@@ -77,11 +77,6 @@ export function getEnvironmentIssues(source: Record<string, string | undefined> 
   requireValue(normalized, "PASSID_WEBHOOK_SECRET", issues, production ? 24 : 8);
   requireHttpsUrl(normalized, "PASSID_REDIRECT_URL", issues);
   requireHttpsUrl(normalized, "PASSID_WEBHOOK_URL", issues);
-  if (production) {
-    requireValue(normalized, "RESEND_API_KEY", issues, 10);
-    requireValue(normalized, "PASSWORD_RESET_EMAIL_FROM", issues, 5);
-  }
-
   const env = read(normalized, "PASSID_ENVIRONMENT");
   if (env !== "sandbox" && env !== "live") issues.push("PASSID_ENVIRONMENT: must be sandbox or live");
   const secret = read(normalized, "PASSID_SECRET_KEY");

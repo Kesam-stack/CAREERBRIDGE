@@ -35,10 +35,8 @@ describe("CareerBridge production environment validation", () => {
     expect(issues).toContain("APP_URL: must use https in production");
   });
 
-  it("requires production password-reset email delivery", () => {
-    const issues = getEnvironmentIssues({ ...complete, RESEND_API_KEY: "", PASSWORD_RESET_EMAIL_FROM: "" });
-    expect(issues).toContain("RESEND_API_KEY: missing");
-    expect(issues).toContain("PASSWORD_RESET_EMAIL_FROM: missing");
+  it("keeps the service available when optional password-reset delivery is not configured", () => {
+    expect(getEnvironmentIssues({ ...complete, RESEND_API_KEY: "", PASSWORD_RESET_EMAIL_FROM: "" })).toEqual([]);
   });
 
   it("rejects a sandbox Connect base URL in live mode", () => {
