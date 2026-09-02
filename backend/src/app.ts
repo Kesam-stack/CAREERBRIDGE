@@ -23,6 +23,13 @@ const REQUIREMENT_TO_SCOPE: Record<string, string> = {
   account_ownership: "accounts.read",
 };
 
+const PASSID_PAY_DEMO_BASE = "https://passid.io/api/pay/demo";
+const PASSID_PAY_DEMO_SCENARIOS = new Set([
+  "success", "identity_unsatisfied", "account_mismatch", "work_inactive", "credential_expired",
+  "recipient_declines", "destination_changed", "merchant_expired", "duplicate_execution", "provider_timeout",
+  "payment_failed", "payment_returned", "credential_revoked", "forged_webhook", "replayed_webhook", "cross_tenant",
+]);
+
 export interface AppOptions {
   env?: CareerBridgeEnv;
   db?: Database;
