@@ -7,6 +7,12 @@ import "./styles.css";
 type User = { id: string; email: string; role: "candidate" | "employer" | "university" | "admin"; name: string };
 type Job = { id: string; title: string; organization_name: string; location: string; work_mode: string; employment_type: string; compensation: string; description: string; skills: string; verification_requirements: string[] };
 type Application = { id: string; title: string; organization_name?: string; candidate_name?: string; status: string; job_id: string };
+type PayReadiness = {
+  product: { mode: "private_preview" | "unavailable"; transfers_enabled: false; public_api_available: false };
+  role: User["role"];
+  summary: { total: number; verification_complete: number; needs_verification: number; attention_required: number };
+  applications?: Array<{ id: string; title: string; organization_name: string; application_status: string; verification_state: string; identity_bound: boolean; consent_status: string }>;
+};
 
 const requirementLabels: Record<string, string> = {
   identity_verified: "Identity verified",
@@ -112,7 +118,7 @@ function App() {
   }
 
   useEffect(() => { refresh(); }, []);
-  const value = useMemo(() => ({ user, csrf, refresh, setUser, setCsrf }), [user, csrf]);
+  const value = useMemo(() => ({ user, csrf, refresh, setUser, setCsrf, authLoading: loading }), [user, csrf, loading]);
 
   return (
     <BrowserRouter>
@@ -472,54 +478,89 @@ function Verification({ auth }: { auth: any }) {
 }
 
 function PassidPay({ auth }: { auth: any }) {
-  const [apps, setApps] = useState<Application[]>([]);
-  const [loading, setLoading] = useState(auth.user?.role === "candidate");
+  const [readiness, setReadiness] = useState<PayReadiness | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
   useEffect(() => {
-    if (auth.user?.role !== "candidate") {
+    if (auth.authLoading) return;
+    if (!auth.user || !["candidate", "employer", "admin"].includes(auth.user.role)) {
+      setReadiness(null);
       setLoading(false);
       return;
     }
-    api("/api/applications")
-      .then((r) => r.json())
-      .then((body) => setApps(safeList(body.applications)))
+    setLoading(true);
+    setError("");
+    api("/api/passid/pay/readiness")
+      .then(async (response) => {
+        const body = await response.json();
+        if (!response.ok) throw new Error(body.error ?? "readiness_unavailable");
+        setReadiness(body);
+      })
+      .catch(() => setError("We could not check PASSID readiness right now. Your verification data has not changed."))
       .finally(() => setLoading(false));
-  }, [auth.user?.role]);
+  }, [auth.authLoading, auth.user?.id, auth.user?.role]);
 
-  const verifiedApplication = apps.find((application) => ["under_review", "accepted", "hired"].includes(application.status));
-  const hasApplication = apps.length > 0;
-  const readiness = verifiedApplication
-    ? { label: "Identity ready", detail: `${verifiedApplication.title} has completed its required PASSID verification.`, tone: "ready" }
-    : hasApplication
-      ? { label: "Verification needed", detail: "Complete the PASSID request attached to your application before payout onboarding.", tone: "pending" }
-      : { label: "Application needed", detail: "Apply to an opportunity before starting verified-payee onboarding.", tone: "neutral" };
+  const candidateApps = safeList(readiness?.applications);
+  const verifiedApplication = candidateApps.find((application) => application.verification_state === "verification_complete");
+  const attentionApplication = candidateApps.find((application) => ["revoked", "expired", "identity_conflict"].includes(application.verification_state));
+  const candidateState = verifiedApplication
+    ? { label: "PASSID verification complete", detail: `${verifiedApplication.title} has active, complete verification evidence.`, tone: "ready", action: "/applications", actionLabel: "View application" }
+    : attentionApplication
+      ? { label: "Attention required", detail: "A PASSID connection is expired, revoked, or requires identity review.", tone: "attention", action: "/settings", actionLabel: "Review access" }
+      : candidateApps.length
+        ? { label: "Verification needed", detail: "Complete the consent request attached to your application before future payout onboarding.", tone: "pending", action: "/verification", actionLabel: "Complete verification" }
+        : { label: "Start with an opportunity", detail: "Apply to a role to begin verified candidate onboarding.", tone: "neutral", action: "/jobs", actionLabel: "Browse opportunities" };
+  const isEmployer = auth.user?.role === "employer" || auth.user?.role === "admin";
 
   return <section className="page pay-page">
     <div className="pay-hero">
       <div className="pay-hero-copy">
-        <span className="eyebrow"><WalletCards size={16} /> PASSID Pay · Private preview</span>
+        <div className="launch-status"><span className="status-dot" /> Private preview · Transfers disabled</div>
         <h1>Verified people.<br />Permissioned payouts.</h1>
-        <p>CareerBridge is preparing a safer bridge from verified hiring to payout onboarding—built around the identity consent candidates already control.</p>
+        <p>{isEmployer ? "Prepare verified candidates for a future payout experience built around explicit permission, institution controls, and an audit-ready trail." : "Move from verified hiring to payout onboarding with one identity candidates control and one consent trail institutions can trust."}</p>
         <div className="hero-actions">
           {auth.user?.role === "candidate" && !verifiedApplication
-            ? <Link className="button" to={hasApplication ? "/verification" : "/jobs"}>{hasApplication ? "Complete verification" : "Find an opportunity"} <ChevronRight size={17} /></Link>
+            ? <Link className="button" to={candidateState.action}>{candidateState.actionLabel} <ChevronRight size={17} /></Link>
             : <a className="button" href="https://passid.io/passid-pay" target="_blank" rel="noreferrer">Join the private-preview waitlist <ExternalLink size={17} /></a>}
-          <Link className="button secondary" to="/verification">Review PASSID access</Link>
+          {auth.user ? <Link className="button secondary" to={isEmployer ? "/applications" : "/settings"}>{isEmployer ? "Review applicants" : "Manage PASSID access"}</Link> : <Link className="button secondary" to="/login">Sign in</Link>}
         </div>
+        <div className="trust-strip"><span><ShieldCheck size={15} /> Verified identity</span><span><LockKeyhole size={15} /> Explicit consent</span><span><ReceiptText size={15} /> Traceable authorization</span></div>
       </div>
-      <div className="pay-card" aria-label="PASSID Pay preview card">
+      <div className="pay-card" aria-hidden="true">
         <div className="pay-card-top"><span>PASSID</span><strong>PAY</strong></div>
         <div className="pay-card-chip"><span /><span /><span /></div>
-        <p>Verified payout identity</p>
-        <strong>{auth.user?.name ?? "CareerBridge candidate"}</strong>
-        <div className="pay-card-footer"><span>Consent required</span><ShieldCheck size={20} /></div>
+        <p>{isEmployer ? "Institution control profile" : "Verified candidate profile"}</p>
+        <strong>{auth.user?.name ?? "Your verified identity"}</strong>
+        <div className="pay-card-footer"><span>Permission required</span><ShieldCheck size={20} /></div>
       </div>
     </div>
 
-    {auth.user?.role === "candidate" && <div className="readiness-panel">
-      <div className={`readiness-icon ${readiness.tone}`}><BadgeCheck size={24} /></div>
-      <div><span className="eyebrow">Your readiness</span><h2>{loading ? "Checking PASSID status…" : readiness.label}</h2><p>{loading ? "Reviewing your CareerBridge applications." : readiness.detail}</p></div>
-      {!loading && <Link className="button secondary" to={verifiedApplication ? "/applications" : hasApplication ? "/verification" : "/jobs"}>View next step <ChevronRight size={16} /></Link>}
+    {error && <div className="pay-error" role="alert"><XCircle size={20} /><span>{error}</span><button type="button" className="text-button" onClick={() => window.location.reload()}>Try again</button></div>}
+
+    {auth.authLoading || loading ? <div className="pay-loading" aria-live="polite"><span className="spinner" /><div><strong>Checking secure readiness</strong><span>Reviewing current consent and verification evidence.</span></div></div> : auth.user?.role === "candidate" && <>
+      <div className="readiness-panel">
+        <div className={`readiness-icon ${candidateState.tone}`}><BadgeCheck size={24} /></div>
+        <div><span className="eyebrow">Your verified-payee path</span><h2>{candidateState.label}</h2><p>{candidateState.detail}</p></div>
+        <Link className="button secondary" to={candidateState.action}>{candidateState.actionLabel} <ChevronRight size={16} /></Link>
+      </div>
+      <div className="readiness-steps" aria-label="Future payout readiness steps">
+        <div className={verifiedApplication ? "complete" : "current"}><span><CheckCircle2 size={18} /></span><div><small>Step 1</small><strong>Verify with PASSID</strong><p>Confirm required claims with active consent.</p></div></div>
+        <div className="locked"><span><Landmark size={18} /></span><div><small>Step 2 · Preview</small><strong>Authorize a destination</strong><p>Choose where an approved payout may be delivered.</p></div></div>
+        <div className="locked"><span><ArrowRightLeft size={18} /></span><div><small>Step 3 · Preview</small><strong>Approve each payout</strong><p>Review purpose and consent before funds move.</p></div></div>
+      </div>
+    </>}
+
+    {!loading && isEmployer && readiness && <div className="operations-panel">
+      <div className="operations-heading"><div><span className="eyebrow">Payout operations preview</span><h2>Verified recipient pipeline</h2><p>A privacy-preserving view of readiness across applicants your organization is permitted to review.</p></div><span className="preview-seal">No financial data</span></div>
+      <div className="operations-metrics">
+        <div><span>Total applicants</span><strong>{readiness.summary.total}</strong><small>In your organization scope</small></div>
+        <div><span>Verification complete</span><strong>{readiness.summary.verification_complete}</strong><small>Active evidence and consent</small></div>
+        <div><span>Next action needed</span><strong>{readiness.summary.needs_verification}</strong><small>Candidate-controlled</small></div>
+        <div><span>Attention required</span><strong>{readiness.summary.attention_required}</strong><small>Expired, revoked, or conflict</small></div>
+      </div>
     </div>}
+
+    {!auth.authLoading && !auth.user && <div className="guest-path"><div><span className="eyebrow">Designed for both sides</span><h2>One trusted handoff between work and pay.</h2></div><div className="guest-paths"><div><UserRoundCheck size={22} /><strong>For candidates</strong><p>Reuse verified identity and approve access deliberately.</p></div><div><Building2 size={22} /><strong>For institutions</strong><p>Prepare eligible recipients without exposing unnecessary personal data.</p></div></div></div>}
 
     <div className="pay-section-heading">
       <span className="eyebrow">Planned capabilities</span>
@@ -531,7 +572,7 @@ function PassidPay({ auth }: { auth: any }) {
       <div className="pay-feature"><ArrowRightLeft size={24} /><span>02</span><h3>Permissioned transfers</h3><p>Ask for explicit, purpose-specific customer authorization instead of retaining standing payment authority.</p></div>
       <div className="pay-feature"><ReceiptText size={24} /><span>03</span><h3>Audit-ready settlement</h3><p>Associate each future transfer with the verified identity and consent record that authorized it.</p></div>
     </div>
-    <div className="pay-disclosure"><LockKeyhole size={22} /><div><strong>Preview only—no funds move through CareerBridge.</strong><p>PASSID Pay currently has no public API, SDK, production endpoint, transaction engine, ledger, or payout rail. CareerBridge will keep payment actions disabled until an approved integration is available.</p></div></div>
+    <div className="pay-disclosure"><LockKeyhole size={22} /><div><strong>Preview only—no funds move through CareerBridge.</strong><p>The server reports transfers as disabled. PASSID Pay currently has no public API, SDK, production endpoint, transaction engine, ledger, or payout rail; CareerBridge cannot create a payment.</p></div></div>
   </section>;
 }
 

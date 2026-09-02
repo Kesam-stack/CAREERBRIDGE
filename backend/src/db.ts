@@ -82,6 +82,45 @@ export function migrate(db: Database): void {
   db.run(`CREATE TABLE IF NOT EXISTS verification_results (id TEXT PRIMARY KEY, application_id TEXT NOT NULL REFERENCES applications(id), candidate_user_id TEXT NOT NULL REFERENCES users(id), result_json TEXT NOT NULL, updated_at INTEGER NOT NULL)`);
   db.run(`CREATE TABLE IF NOT EXISTS passid_webhook_events (id TEXT PRIMARY KEY, type TEXT NOT NULL, passid_connection_id TEXT, processed_at INTEGER NOT NULL, payload_summary TEXT NOT NULL)`);
   db.run(`CREATE TABLE IF NOT EXISTS audit_logs (id TEXT PRIMARY KEY, actor_user_id TEXT, action TEXT NOT NULL, target_type TEXT, target_id TEXT, detail_json TEXT NOT NULL, created_at INTEGER NOT NULL)`);
+  db.run(`CREATE TABLE IF NOT EXISTS pay_sandbox_recipients (
+    id TEXT PRIMARY KEY,
+    application_id TEXT NOT NULL UNIQUE REFERENCES applications(id),
+    candidate_user_id TEXT NOT NULL REFERENCES users(id),
+    destination_type TEXT NOT NULL CHECK(destination_type IN ('sandbox_bank','sandbox_wallet')),
+    destination_label TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('active','revoked')),
+    consented_at INTEGER NOT NULL,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+  )`);
+  db.run(`CREATE TABLE IF NOT EXISTS pay_sandbox_transfers (
+    id TEXT PRIMARY KEY,
+    organization_id TEXT NOT NULL REFERENCES organizations(id),
+    application_id TEXT NOT NULL REFERENCES applications(id),
+    recipient_id TEXT NOT NULL REFERENCES pay_sandbox_recipients(id),
+    created_by_user_id TEXT NOT NULL REFERENCES users(id),
+    amount_minor INTEGER NOT NULL CHECK(amount_minor > 0 AND amount_minor <= 100000000),
+    currency TEXT NOT NULL CHECK(currency='USD'),
+    purpose TEXT NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('requires_recipient_consent','processing','settled','declined','failed','returned','canceled')),
+    idempotency_key TEXT NOT NULL,
+    consented_at INTEGER,
+    settled_at INTEGER,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    UNIQUE(organization_id,idempotency_key)
+  )`);
+  db.run(`CREATE TABLE IF NOT EXISTS pay_sandbox_events (
+    id TEXT PRIMARY KEY,
+    transfer_id TEXT REFERENCES pay_sandbox_transfers(id),
+    recipient_id TEXT REFERENCES pay_sandbox_recipients(id),
+    type TEXT NOT NULL,
+    actor_user_id TEXT,
+    payload_summary TEXT NOT NULL,
+    created_at INTEGER NOT NULL
+  )`);
+  db.run("CREATE INDEX IF NOT EXISTS idx_pay_sandbox_transfers_application ON pay_sandbox_transfers(application_id,created_at)");
+  db.run("CREATE INDEX IF NOT EXISTS idx_pay_sandbox_events_transfer ON pay_sandbox_events(transfer_id,created_at)");
 
   for (const job of db.prepare("SELECT id, verification_requirements FROM jobs").all() as any[]) {
     const requirements = jsonArray(job.verification_requirements).filter((req) => STORED_VERIFICATION_REQUIREMENTS.has(req));

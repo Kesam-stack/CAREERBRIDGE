@@ -42,7 +42,6 @@ export function verifyPassword(password: string, stored: string): boolean {
   const expectedBuf = Buffer.from(expected, "hex");
   return actual.length === expectedBuf.length && timingSafeEqual(actual, expectedBuf);
 }
-
 export function hmac(value: string | Buffer, secret: string): string {
   return createHmac("sha256", secret).update(value).digest("hex");
 }

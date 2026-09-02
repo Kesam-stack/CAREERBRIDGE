@@ -15,6 +15,7 @@ export interface CareerBridgeEnv {
   PASSID_ENVIRONMENT: PassidEnvironment;
   PASSID_REDIRECT_URL: string;
   PASSID_WEBHOOK_URL: string;
+  PASSID_PAY_PREVIEW_ENABLED: boolean;
 }
 
 const PLACEHOLDER = /^(changeme|change-me|placeholder|secret|test|todo|example)$/i;
@@ -119,6 +120,7 @@ export function loadEnv(source: Record<string, string | undefined> = process.env
     PASSID_ENVIRONMENT: passidEnvironment,
     PASSID_REDIRECT_URL: read(source, "PASSID_REDIRECT_URL") || "http://localhost:4100/api/passid/callback",
     PASSID_WEBHOOK_URL: read(source, "PASSID_WEBHOOK_URL") || "http://localhost:4100/api/webhooks/passid",
+    PASSID_PAY_PREVIEW_ENABLED: read(source, "PASSID_PAY_PREVIEW_ENABLED").toLowerCase() !== "false",
   };
 }
 

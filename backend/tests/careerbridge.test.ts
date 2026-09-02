@@ -22,6 +22,7 @@ const baseEnv: CareerBridgeEnv = {
   PASSID_ENVIRONMENT: "sandbox",
   PASSID_REDIRECT_URL: "https://api.careerbridge.test/api/passid/callback",
   PASSID_WEBHOOK_URL: "https://api.careerbridge.test/api/webhooks/passid",
+  PASSID_PAY_PREVIEW_ENABLED: true,
 };
 
 describe("PKCE secret handling", () => {
@@ -284,6 +285,40 @@ describe("CareerBridge independent PASSID institution app", () => {
     expect(body.hosted_url).toContain("/connect/authorize");
     expect(body.hosted_url).not.toContain("client_secret");
     expect(JSON.stringify(body)).not.toContain(baseEnv.PASSID_SECRET_KEY);
+  });
+
+  it("derives PASSID Pay preview readiness from active consent and verification evidence", async () => {
+    const anonymous = await app.request("/api/passid/pay/readiness");
+    expect(anonymous.status).toBe(401);
+
+    const candidate = await login(app, "amara@careerbridge.test");
+    const application = await applyToDemoJob(app, candidate);
+    const pending = await app.request("/api/passid/pay/readiness", { headers: { Cookie: candidate.cookie } });
+    expect(pending.status).toBe(200);
+    expect(pending.headers.get("cache-control")).toBe("private, no-store");
+    const pendingBody = await pending.json() as any;
+    expect(pendingBody.product).toEqual({ mode: "private_preview", transfers_enabled: false, public_api_available: false });
+    expect(pendingBody.summary.needs_verification).toBe(1);
+    expect(pendingBody.applications[0].verification_state).toBe("needs_verification");
+
+    const timestamp = Date.now();
+    db.prepare("INSERT INTO passid_subject_bindings (subject_hash,candidate_user_id,status,created_at,updated_at) VALUES ('subject_hash_pay','candidate_demo','bound',?,?)").run(timestamp, timestamp);
+    db.prepare("INSERT INTO passid_connections (id,application_id,candidate_user_id,passid_session_id,connection_id,status,granted_scopes,consent_status,created_at,updated_at) VALUES ('cbconn_pay',?,'candidate_demo','pcs_pay','conn_pay','approved','[\"identity.read\",\"income.read\"]','active',?,?)")
+      .run(application.id, timestamp, timestamp);
+    db.prepare("INSERT INTO verification_results (id,application_id,candidate_user_id,result_json,updated_at) VALUES ('vr_pay',?,'candidate_demo',?,?)")
+      .run(application.id, JSON.stringify({ identity: "verified", income: "verified", consent_status: "active" }), timestamp);
+
+    const ready = await app.request("/api/passid/pay/readiness", { headers: { Cookie: candidate.cookie } });
+    const readyBody = await ready.json() as any;
+    expect(readyBody.summary.verification_complete).toBe(1);
+    expect(readyBody.applications[0]).toMatchObject({ verification_state: "verification_complete", identity_bound: true, consent_status: "active" });
+
+    const employer = await login(app, "recruiter@careerbridge.test", "employer");
+    const employerReadiness = await app.request("/api/passid/pay/readiness", { headers: { Cookie: employer.cookie } });
+    const employerBody = await employerReadiness.json() as any;
+    expect(employerBody.summary).toEqual({ total: 1, verification_complete: 1, needs_verification: 0, attention_required: 0 });
+    expect(employerBody.applications).toBeUndefined();
+    expect(JSON.stringify(employerBody)).not.toContain("subject_hash_pay");
   });
 
   it("reuses an existing pending PASSID session to avoid duplicate upstream calls", async () => {
