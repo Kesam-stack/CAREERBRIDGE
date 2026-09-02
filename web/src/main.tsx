@@ -526,6 +526,25 @@ function PassidPay({ auth }: { auth: any }) {
   const [readiness, setReadiness] = useState<PayReadiness | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [intents, setIntents] = useState<any[]>([]);
+  const [intentsMessage, setIntentsMessage] = useState("");
+  const [employerApps, setEmployerApps] = useState<Application[]>([]);
+  const [busyId, setBusyId] = useState("");
+  const [demoIntent, setDemoIntent] = useState<any>(null);
+  const [demoResult, setDemoResult] = useState<any>(null);
+  const [demoBusy, setDemoBusy] = useState("");
+  const [demoMessage, setDemoMessage] = useState("");
+
+  const isEmployer = auth.user?.role === "employer" || auth.user?.role === "admin";
+  const payLive = readiness?.product.mode === "live";
+
+  async function refreshIntents() {
+    if (!auth.user || !payLive) return;
+    const res = await api("/api/passid/pay/intents");
+    const body = await res.json();
+    if (res.ok) setIntents(safeList(body.intents));
+  }
+
   useEffect(() => {
     if (auth.authLoading) return;
     if (!auth.user || !["candidate", "employer", "admin"].includes(auth.user.role)) {
@@ -545,18 +564,113 @@ function PassidPay({ auth }: { auth: any }) {
       .finally(() => setLoading(false));
   }, [auth.authLoading, auth.user?.id, auth.user?.role]);
 
+  useEffect(() => { refreshIntents(); }, [auth.user?.id, payLive]);
+  useEffect(() => {
+    if (isEmployer) api("/api/applications").then((r) => r.json()).then((b) => setEmployerApps(safeList(b.applications))).catch(() => {});
+  }, [isEmployer]);
+
+  async function createIntent(e: React.FormEvent<HTMLFormElement>) {
+    e.preventDefault();
+    setIntentsMessage("");
+    const fd = new FormData(e.currentTarget);
+    const amountDollars = Number(fd.get("amount"));
+    const payload = {
+      application_id: String(fd.get("application_id") ?? ""),
+      amount_minor: Math.round(amountDollars * 100),
+      currency: "USD",
+      purpose: String(fd.get("purpose") ?? ""),
+      idempotency_key: `pay-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    };
+    const res = await api("/api/passid/pay/intents", { method: "POST", body: JSON.stringify(payload) }, auth.csrf);
+    const body = await res.json();
+    setIntentsMessage(res.ok ? `Payment intent created (${body.status}).` : body.error ?? "Unable to create payment intent.");
+    if (res.ok) { e.currentTarget.reset(); await refreshIntents(); }
+  }
+
+  async function consent(id: string, approved: boolean) {
+    setBusyId(id);
+    setIntentsMessage("");
+    const res = await api(`/api/passid/pay/intents/${id}/consent`, { method: "POST", body: JSON.stringify({ approved, confirm_destination: approved }) }, auth.csrf);
+    const body = await res.json();
+    setIntentsMessage(res.ok ? `Consent recorded (${body.status}).` : body.error ?? "Unable to record consent.");
+    setBusyId("");
+    await refreshIntents();
+  }
+
+  async function execute(id: string) {
+    setBusyId(id);
+    setIntentsMessage("");
+    const res = await api(`/api/passid/pay/intents/${id}/execute`, { method: "POST" }, auth.csrf);
+    const body = await res.json();
+    setIntentsMessage(res.ok ? `Payment intent executed (${body.status}).` : body.error ?? "Unable to execute payment intent.");
+    setBusyId("");
+    await refreshIntents();
+  }
+
+  async function createDemoIntent(e: React.FormEvent<HTMLFormElement>) {
+    e.preventDefault();
+    setDemoBusy("create");
+    setDemoMessage("");
+    setDemoIntent(null);
+    setDemoResult(null);
+    const fd = new FormData(e.currentTarget);
+    const response = await api("/api/passid/pay/demo/intents", {
+      method: "POST",
+      body: JSON.stringify({
+        amount: Math.round(Number(fd.get("amount")) * 100),
+        currency: "USD",
+        purpose: "contractor_payout",
+        scenario: String(fd.get("scenario") ?? "success"),
+      }),
+    }, auth.csrf);
+    const body = await response.json();
+    if (response.ok) {
+      setDemoIntent(body.intent);
+      setDemoMessage("Official PASSID sandbox intent created. Recipient consent is now required.");
+    } else setDemoMessage(body.message ?? "The PASSID public sandbox could not create this intent.");
+    setDemoBusy("");
+  }
+
+  async function consentDemo(approved: boolean) {
+    if (!demoIntent?.id) return;
+    setDemoBusy("consent");
+    setDemoMessage("");
+    const response = await api(`/api/passid/pay/demo/intents/${demoIntent.id}/consent`, {
+      method: "POST",
+      body: JSON.stringify({ approved, confirm_destination: approved }),
+    }, auth.csrf);
+    const body = await response.json();
+    if (response.ok) {
+      setDemoIntent(body.intent);
+      setDemoMessage(approved ? "Consent granted and the synthetic payout destination confirmed." : "Consent declined. No payout can be executed.");
+    } else setDemoMessage(body.message ?? "PASSID could not record sandbox consent for this scenario.");
+    setDemoBusy("");
+  }
+
+  async function executeDemo() {
+    if (!demoIntent?.id) return;
+    setDemoBusy("execute");
+    setDemoMessage("");
+    const response = await api(`/api/passid/pay/demo/intents/${demoIntent.id}/execute`, { method: "POST" }, auth.csrf);
+    const body = await response.json();
+    if (response.ok) {
+      setDemoResult(body.result);
+      setDemoIntent(body.result.intent);
+      setDemoMessage("Simulation completed. PASSID issued a sandbox receipt and signed payment credential.");
+    } else setDemoMessage(body.message ?? "PASSID returned the expected failure for this sandbox scenario.");
+    setDemoBusy("");
+  }
+
   const candidateApps = safeList(readiness?.applications);
   const verifiedApplication = candidateApps.find((application) => application.verification_state === "verification_complete");
   const attentionApplication = candidateApps.find((application) => ["revoked", "expired", "identity_conflict"].includes(application.verification_state));
   const candidateState = verifiedApplication
     ? { label: "PASSID verification complete", detail: `${verifiedApplication.title} has active, complete verification evidence.`, tone: "ready", action: "/applications", actionLabel: "View application" }
     : attentionApplication
-      ? { label: "Attention required", detail: "A PASSID connection is expired, revoked, or requires identity review.", tone: "attention", action: "/settings", actionLabel: "Review access" }
+      ? { label: "Connection review recommended", detail: "A CareerBridge PASSID connection is expired, revoked, or under identity review. This does not block the independent Pay sandbox below.", tone: "attention", action: "/settings", actionLabel: "Manage connection" }
       : candidateApps.length
-        ? { label: "Verification needed", detail: "Complete the consent request attached to your application before future payout onboarding.", tone: "pending", action: "/verification", actionLabel: "Complete verification" }
+        ? { label: "Verification needed", detail: "Complete the consent request attached to your application before payout onboarding.", tone: "pending", action: "/verification", actionLabel: "Complete verification" }
         : { label: "Start with an opportunity", detail: "Apply to a role to begin verified candidate onboarding.", tone: "neutral", action: "/jobs", actionLabel: "Browse opportunities" };
-  const isEmployer = auth.user?.role === "employer" || auth.user?.role === "admin";
-
   return <section className="page pay-page">
     <div className="pay-hero">
       <div className="pay-hero-copy">
@@ -564,9 +678,9 @@ function PassidPay({ auth }: { auth: any }) {
         <h1>Verified people.<br />Permissioned payouts.</h1>
         <p>{isEmployer ? "Prepare verified candidates for payout authorization built around explicit permission, institution controls, and an audit-ready trail." : "Move from verified hiring to payout onboarding with one identity candidates control and one consent trail institutions can trust."}</p>
         <div className="hero-actions">
-          {auth.user?.role === "candidate" && !verifiedApplication
-            ? <Link className="button" to={candidateState.action}>{candidateState.actionLabel} <ChevronRight size={17} /></Link>
-            : <a className="button" href="https://passid.io/passid-pay" target="_blank" rel="noreferrer">Learn about PASSID Pay <ExternalLink size={17} /></a>}
+          {auth.user
+            ? <a className="button" href="#passid-pay-sandbox">Run sandbox payout <ChevronRight size={17} /></a>
+            : <Link className="button" to="/login">Sign in to run sandbox <ChevronRight size={17} /></Link>}
           {auth.user ? <Link className="button secondary" to={isEmployer ? "/applications" : "/settings"}>{isEmployer ? "Review applicants" : "Manage PASSID access"}</Link> : <Link className="button secondary" to="/login">Sign in</Link>}
         </div>
         <div className="trust-strip"><span><ShieldCheck size={15} /> Verified identity</span><span><LockKeyhole size={15} /> Explicit consent</span><span><ReceiptText size={15} /> Traceable authorization</span></div>
@@ -581,6 +695,36 @@ function PassidPay({ auth }: { auth: any }) {
     </div>
 
     {error && <div className="pay-error" role="alert"><XCircle size={20} /><span>{error}</span><button type="button" className="text-button" onClick={() => window.location.reload()}>Try again</button></div>}
+
+    {auth.user && <div className="pay-sandbox" id="passid-pay-sandbox">
+      <div className="pay-sandbox-heading">
+        <div><span className="eyebrow">Official PASSID public sandbox</span><h2>Run a payout simulation now</h2><p>This test uses PASSID's synthetic merchant and recipient. It is independent of your CareerBridge application status and never moves real funds.</p></div>
+        <span className="preview-seal">No private key required</span>
+      </div>
+      <form className="pay-sandbox-form" onSubmit={createDemoIntent}>
+        <label>Test amount (USD)<input name="amount" type="number" min="1" max="1000000" step="0.01" defaultValue="1200.00" required /></label>
+        <label>Scenario<select name="scenario" defaultValue="success">
+          <option value="success">Successful simulated payout</option>
+          <option value="identity_unsatisfied">Identity requirement not satisfied</option>
+          <option value="account_mismatch">Account-ownership mismatch</option>
+          <option value="recipient_declines">Recipient declines disclosure</option>
+          <option value="destination_changed">Destination changed after consent</option>
+          <option value="provider_timeout">Provider timeout</option>
+          <option value="payment_failed">Payment failed</option>
+          <option value="payment_returned">Payment returned</option>
+        </select></label>
+        <button className="button" type="submit" disabled={Boolean(demoBusy)}>{demoBusy === "create" ? "Creating…" : "Create sandbox intent"}</button>
+      </form>
+      {demoMessage && <div className="notice" role="status">{demoMessage}</div>}
+      {demoIntent && <div className="pay-sandbox-result">
+        <div><small>Intent</small><strong>{demoIntent.id}</strong></div>
+        <div><small>Amount</small><strong>${((demoIntent.amount ?? 0) / 100).toFixed(2)} {demoIntent.currency}</strong></div>
+        <div><small>State</small><strong>{titleCase(demoIntent.state ?? demoIntent.status)}</strong></div>
+        {demoIntent.state === "requires_recipient_consent" && <div className="pay-sandbox-actions"><button className="button" type="button" disabled={Boolean(demoBusy)} onClick={() => consentDemo(true)}>Grant consent & confirm destination</button><button className="button secondary" type="button" disabled={Boolean(demoBusy)} onClick={() => consentDemo(false)}>Decline</button></div>}
+        {demoIntent.state === "ready_for_execution" && <div className="pay-sandbox-actions"><button className="button" type="button" disabled={Boolean(demoBusy)} onClick={executeDemo}>{demoBusy === "execute" ? "Executing…" : "Execute simulated payout"}</button></div>}
+        {demoResult && <div className="pay-sandbox-credential"><CheckCircle2 size={20} /><div><strong>{titleCase(demoResult.outcome)}</strong><span>Receipt {demoResult.receipt_id}</span><span>Credential {demoResult.credential_id}</span></div></div>}
+      </div>}
+    </div>}
 
     {auth.authLoading || loading ? <div className="pay-loading" aria-live="polite"><span className="spinner" /><div><strong>Checking secure readiness</strong><span>Reviewing current consent and verification evidence.</span></div></div> : auth.user?.role === "candidate" && <>
       <div className="readiness-panel">
@@ -606,6 +750,35 @@ function PassidPay({ auth }: { auth: any }) {
     </div>}
 
     {!auth.authLoading && !auth.user && <div className="guest-path"><div><span className="eyebrow">Designed for both sides</span><h2>One trusted handoff between work and pay.</h2></div><div className="guest-paths"><div><UserRoundCheck size={22} /><strong>For candidates</strong><p>Reuse verified identity and approve access deliberately.</p></div><div><Building2 size={22} /><strong>For institutions</strong><p>Prepare eligible recipients without exposing unnecessary personal data.</p></div></div></div>}
+
+    {!loading && auth.user && !payLive && <div className="notice">The institution-key integration is not configured on this server. The official public sandbox above remains fully available for testing.</div>}
+
+    {!loading && auth.user && payLive && <div className="data-panel">
+      <h2>Payment intents</h2>
+      {intentsMessage && <div className="notice">{intentsMessage}</div>}
+      {isEmployer && <form className="form-grid" onSubmit={createIntent}>
+        <select name="application_id" required>
+          <option value="">Select a verified applicant's application</option>
+          {employerApps.map((application) => <option key={application.id} value={application.id}>{application.title} · {application.candidate_name ?? application.id}</option>)}
+        </select>
+        <input name="amount" type="number" min="0.01" step="0.01" placeholder="Amount (USD)" required />
+        <input name="purpose" placeholder="Purpose (e.g. contractor_payout)" minLength={3} maxLength={160} required />
+        <button className="button" type="submit">Create payment intent</button>
+        <small>Only applications with completed PASSID verification will be accepted; PassID rejects the rest with `passid_verification_required`.</small>
+      </form>}
+      {intents.length ? <div className="table">{intents.map((intent) => <div className="table-row" key={intent.id}>
+        <span>{intent.title ?? intent.id}</span>
+        <span>{intent.candidate_name ?? intent.organization_name}</span>
+        <span>${((intent.amount_minor ?? 0) / 100).toFixed(2)} · {intent.purpose}</span>
+        <strong>{intent.status}</strong>
+        {auth.user?.role === "candidate" && intent.status === "requires_consent" && <span className="hero-actions">
+          <button className="button" type="button" disabled={busyId === intent.id} onClick={() => consent(intent.id, true)}>Approve</button>
+          <button className="button secondary" type="button" disabled={busyId === intent.id} onClick={() => consent(intent.id, false)}>Decline</button>
+        </span>}
+        {isEmployer && intent.status === "ready_to_execute" && <button className="button" type="button" disabled={busyId === intent.id} onClick={() => execute(intent.id)}>Execute</button>}
+        {intent.hosted_url && <a className="button secondary" href={intent.hosted_url} target="_blank" rel="noreferrer">Open hosted consent <ExternalLink size={15} /></a>}
+      </div>)}</div> : <p>No payment intents yet.{isEmployer ? "" : " An institution creates a payment intent once your application has completed PASSID verification."}</p>}
+    </div>}
 
     <div className="pay-section-heading">
       <span className="eyebrow">How it works</span>

@@ -462,6 +462,54 @@ describe("CareerBridge independent PASSID institution app", () => {
     expect(JSON.stringify(employerBody)).not.toContain("subject_hash_pay");
   });
 
+  it("runs the official PASSID public sandbox independently of application readiness", async () => {
+    const anonymous = await app.request("/api/passid/pay/demo/intents", { method: "POST" });
+    expect(anonymous.status).toBe(401);
+
+    const candidate = await login(app, "amara@careerbridge.test");
+    const calls: string[] = [];
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input);
+      calls.push(url);
+      const id = "pi_sbx_careerbridge123";
+      if (url.endsWith("/execute")) return Response.json({ success: true, environment: "sandbox", data: { intent: { id, state: "simulated_completed", status: "simulated_completed" }, receipt_id: "rcpt_sbx_test", credential_id: "cred_sbx_test", outcome: "simulated_completed" } });
+      if (url.endsWith("/consent")) return Response.json({ success: true, environment: "sandbox", data: { id, state: "ready_for_execution", amount: 120000, currency: "USD" } });
+      expect(JSON.parse(String(init?.body))).toMatchObject({ amount: 120000, currency: "USD", purpose: "contractor_payout", scenario: "success" });
+      return Response.json({ success: true, environment: "sandbox", data: { id, state: "requires_recipient_consent", amount: 120000, currency: "USD" } });
+    }) as typeof fetch;
+
+    try {
+      const created = await app.request("/api/passid/pay/demo/intents", {
+        method: "POST",
+        headers: { Cookie: candidate.cookie, "Content-Type": "application/json", "X-CSRF-Token": candidate.csrf },
+        body: JSON.stringify({ amount: 120000, currency: "USD", purpose: "contractor_payout", scenario: "success" }),
+      });
+      expect(created.status).toBe(201);
+      const createdBody = await created.json() as any;
+      expect(createdBody.intent.state).toBe("requires_recipient_consent");
+
+      const consented = await app.request(`/api/passid/pay/demo/intents/${createdBody.intent.id}/consent`, {
+        method: "POST",
+        headers: { Cookie: candidate.cookie, "Content-Type": "application/json", "X-CSRF-Token": candidate.csrf },
+        body: JSON.stringify({ approved: true, confirm_destination: true }),
+      });
+      expect(consented.status).toBe(200);
+      expect((await consented.json() as any).intent.state).toBe("ready_for_execution");
+
+      const executed = await app.request(`/api/passid/pay/demo/intents/${createdBody.intent.id}/execute`, {
+        method: "POST",
+        headers: { Cookie: candidate.cookie, "Content-Type": "application/json", "X-CSRF-Token": candidate.csrf },
+      });
+      const executedBody = await executed.json() as any;
+      expect(executed.status).toBe(200);
+      expect(executedBody.result).toMatchObject({ receipt_id: "rcpt_sbx_test", credential_id: "cred_sbx_test", outcome: "simulated_completed" });
+      expect(calls).toHaveLength(3);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  });
+
   it("reuses an existing pending PASSID session to avoid duplicate upstream calls", async () => {
     let createCount = 0;
     const db = new Database(":memory:");

@@ -137,6 +137,20 @@ label { display: grid; gap: 6px; color: #42546b; font-size: 13px; font-weight: 7
 .pay-error { border: 1px solid #fecaca; color: #991b1b; background: #fff1f2; }
 .pay-error > span { flex: 1; }
 .text-button { padding: 0; border: 0; color: inherit; background: transparent; font-weight: 850; text-decoration: underline; cursor: pointer; }
+.pay-sandbox { margin-bottom: 34px; padding: 26px; scroll-margin-top: 24px; border: 1px solid #99d7d2; border-radius: 18px; background: linear-gradient(145deg, #f0fdfa, #f8fbff); box-shadow: 0 18px 48px rgba(15, 118, 110, .1); }
+.pay-sandbox-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; }
+.pay-sandbox-heading h2 { margin: 7px 0; font-size: 28px; }
+.pay-sandbox-heading p { max-width: 720px; margin: 0; color: #52657d; line-height: 1.6; }
+.pay-sandbox-form { margin-top: 22px; display: grid; grid-template-columns: minmax(150px, .65fr) minmax(240px, 1fr) auto; gap: 14px; align-items: end; }
+.pay-sandbox-form .button { min-height: 43px; }
+.pay-sandbox-result { margin-top: 18px; padding: 18px; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; border: 1px solid #cfe6e4; border-radius: 14px; background: white; }
+.pay-sandbox-result > div:not(.pay-sandbox-actions):not(.pay-sandbox-credential) { min-width: 0; display: grid; gap: 5px; }
+.pay-sandbox-result small { color: #64748b; font-weight: 800; text-transform: uppercase; }
+.pay-sandbox-result strong { overflow-wrap: anywhere; }
+.pay-sandbox-actions, .pay-sandbox-credential { grid-column: 1 / -1; display: flex; align-items: center; gap: 10px; }
+.pay-sandbox-credential { padding: 14px; color: #065f46; border-radius: 11px; background: #d1fae5; }
+.pay-sandbox-credential div { display: grid; gap: 3px; }
+.pay-sandbox-credential span { font-size: 12px; overflow-wrap: anywhere; }
 .readiness-steps { margin: -20px 0 44px 62px; padding-left: 24px; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; border-left: 2px solid #dbe6ef; }
 .readiness-steps > div { min-height: 148px; padding: 18px; display: flex; gap: 12px; border: 1px solid #dce5ef; border-radius: 14px; background: white; }
 .readiness-steps > div > span { width: 34px; height: 34px; flex: 0 0 34px; display: grid; place-items: center; border-radius: 10px; color: #0369a1; background: #e0f2fe; }
@@ -190,7 +204,7 @@ label { display: grid; gap: 6px; color: #42546b; font-size: 13px; font-weight: 7
 @media (max-width: 920px) {
   .app-shell { grid-template-columns: 1fr; }
   .sidebar { position: static; }
-  .hero, .grid-2, .grid-3, .grid-4, .metric-grid, .feature-grid, .detail-layout, .job-card, .table-row, .form-grid, .wallet-panel, .pay-hero, .readiness-panel { grid-template-columns: 1fr; }
+  .hero, .grid-2, .grid-3, .grid-4, .metric-grid, .feature-grid, .detail-layout, .job-card, .table-row, .form-grid, .wallet-panel, .pay-hero, .readiness-panel, .pay-sandbox-form, .pay-sandbox-result { grid-template-columns: 1fr; }
   .wallet-actions { justify-content: flex-start; max-width: none; }
   .wallet-actions small { text-align: left; }
   .hero-copy h1 { font-size: 48px; }
@@ -200,6 +214,7 @@ label { display: grid; gap: 6px; color: #42546b; font-size: 13px; font-weight: 7
   .pay-promo { align-items: flex-start; flex-direction: column; }
   .pay-hero { margin: -34px -20px 24px; padding: 42px 20px; }
   .pay-card { justify-self: start; transform: none; }
+  .pay-sandbox-heading { flex-direction: column; }
   .readiness-steps, .operations-metrics, .guest-path, .guest-paths { grid-template-columns: 1fr; }
   .readiness-steps { margin-left: 0; padding-left: 0; border-left: 0; }
   .operations-heading { flex-direction: column; }

@@ -24,6 +24,15 @@ const REQUIREMENT_TO_SCOPE: Record<string, string> = {
   account_ownership: "accounts.read",
 };
 
+const PASSID_PAY_PUBLIC_DEMO_BASE = "https://passid.io/api/pay/demo";
+const PASSID_PAY_DEMO_SCENARIOS = new Set([
+  "success", "identity_unsatisfied", "account_mismatch", "work_inactive",
+  "credential_expired", "recipient_declines", "destination_changed",
+  "merchant_expired", "duplicate_execution", "provider_timeout",
+  "payment_failed", "payment_returned", "credential_revoked",
+  "forged_webhook", "replayed_webhook", "cross_tenant",
+]);
+
 export interface AppOptions {
   env?: CareerBridgeEnv;
   db?: Database;
@@ -72,6 +81,24 @@ function audit(db: Database, actor: string | null, action: string, targetType: s
 
 function publicUser(user: User) {
   return { id: user.id, email: user.email, role: user.role, name: user.name };
+}
+
+async function callPassidPayPublicDemo(path: string, body?: Record<string, unknown>) {
+  try {
+    const response = await fetch(`${PASSID_PAY_PUBLIC_DEMO_BASE}${path}`, {
+      method: body ? "POST" : "GET",
+      headers: body ? { "Content-Type": "application/json" } : undefined,
+      body: body ? JSON.stringify(body) : undefined,
+      signal: AbortSignal.timeout(12_000),
+    });
+    const payload = await response.json().catch(() => null) as any;
+    if (!response.ok || !payload?.success) {
+      return { ok: false as const, status: response.status, error: payload?.error?.message ?? payload?.error ?? "PASSID sandbox rejected the request" };
+    }
+    return { ok: true as const, data: payload.data, environment: payload.environment ?? "sandbox" };
+  } catch {
+    return { ok: false as const, status: 502, error: "PASSID sandbox is temporarily unreachable" };
+  }
 }
 
 function payReadinessFromRow(row: any) {
@@ -637,6 +664,56 @@ export function createCareerBridgeApp(options: AppOptions = {}) {
     return c.json({ product, role: user.role, summary, applications: user.role === "candidate" ? applications : undefined });
   });
 
+  // PASSID's official public demo is intentionally separate from CareerBridge's
+  // application readiness. It uses synthetic identities and never moves funds.
+  app.post("/api/passid/pay/demo/intents", async (c) => {
+    const user = await requireUser(c, ["candidate", "employer", "admin"]);
+    if (user instanceof Response) return user;
+    const csrf = await requireCsrf(c);
+    if (csrf) return csrf;
+    const parsed = z.object({
+      amount: z.number().int().min(100).max(100_000_000),
+      currency: z.literal("USD"),
+      purpose: z.literal("contractor_payout"),
+      scenario: z.string().refine((value) => PASSID_PAY_DEMO_SCENARIOS.has(value)),
+    }).safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) return c.json({ error: "invalid_demo_payment_intent" }, 400);
+    const limit = consumeRateLimit("passid_pay_demo", user.id, 30, 60 * 60 * 1000);
+    if (!limit.allowed) return c.json({ error: "passid_pay_demo_rate_limited", retry_after_seconds: limit.retryAfterSeconds }, 429);
+    const result = await callPassidPayPublicDemo("/payment-intents", parsed.data);
+    if (!result.ok) return c.json({ error: "passid_pay_demo_unavailable", message: result.error }, 502);
+    audit(db, user.id, "pay.demo.intent.create", "passid_demo_intent", result.data.id, { scenario: parsed.data.scenario, amount: parsed.data.amount });
+    return c.json({ environment: result.environment, intent: result.data }, 201);
+  });
+
+  app.post("/api/passid/pay/demo/intents/:id/consent", async (c) => {
+    const user = await requireUser(c, ["candidate", "employer", "admin"]);
+    if (user instanceof Response) return user;
+    const csrf = await requireCsrf(c);
+    if (csrf) return csrf;
+    const id = c.req.param("id");
+    if (!/^pi_sbx_[a-zA-Z0-9]+$/.test(id)) return c.json({ error: "invalid_demo_payment_intent" }, 400);
+    const parsed = z.object({ approved: z.boolean(), confirm_destination: z.boolean() }).safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success || parsed.data.confirm_destination !== parsed.data.approved) return c.json({ error: "invalid_demo_consent" }, 400);
+    const result = await callPassidPayPublicDemo(`/payment-intents/${id}/consent`, parsed.data);
+    if (!result.ok) return c.json({ error: "passid_pay_demo_unavailable", message: result.error }, 502);
+    audit(db, user.id, "pay.demo.consent", "passid_demo_intent", id, { approved: parsed.data.approved });
+    return c.json({ environment: result.environment, intent: result.data });
+  });
+
+  app.post("/api/passid/pay/demo/intents/:id/execute", async (c) => {
+    const user = await requireUser(c, ["candidate", "employer", "admin"]);
+    if (user instanceof Response) return user;
+    const csrf = await requireCsrf(c);
+    if (csrf) return csrf;
+    const id = c.req.param("id");
+    if (!/^pi_sbx_[a-zA-Z0-9]+$/.test(id)) return c.json({ error: "invalid_demo_payment_intent" }, 400);
+    const result = await callPassidPayPublicDemo(`/payment-intents/${id}/execute`, {});
+    if (!result.ok) return c.json({ error: "passid_pay_demo_unavailable", message: result.error }, 502);
+    audit(db, user.id, "pay.demo.intent.execute", "passid_demo_intent", id, { outcome: result.data?.outcome ?? result.data?.intent?.status });
+    return c.json({ environment: result.environment, result: result.data });
+  });
+
   app.get("/api/passid/pay/intents", async (c) => {
     const user = await requireUser(c, ["candidate", "employer", "admin"]);
     if (user instanceof Response) return user;
@@ -1179,6 +1256,48 @@ export function createCareerBridgeApp(options: AppOptions = {}) {
         db.prepare("UPDATE verification_results SET result_json=?, updated_at=? WHERE application_id=?")
           .run(JSON.stringify({ status: lifecycleStatus, consent_status: lifecycleStatus, updated_at: new Date().toISOString() }), now(), conn.application_id);
         db.prepare("UPDATE applications SET status='verification_required', updated_at=? WHERE id=?").run(now(), conn.application_id);
+      }
+    }
+    // PassID fires this once verification evidence (often manually reviewed) finishes
+    // processing after the connection already exists; without this, CareerBridge only
+    // ever saw the evidence available at the initial /token exchange.
+    if (connectionId && type === "verification.result_ready") {
+      const conn = db.prepare("SELECT * FROM passid_connections WHERE connection_id=? AND consent_status='active'").get(connectionId) as any;
+      if (conn) {
+        try {
+          const refreshed = await passid.retrieveSession(conn.passid_session_id);
+          if (refreshed.status === "approved" && refreshed.connection_id === connectionId) {
+            const grantedScopes = jsonArray(conn.granted_scopes);
+            const scopeStatus = (scope: string, key: string) => grantedScopes.includes(scope) ? (refreshed.verification[key] ?? "available") : "not_granted";
+            const safeResult = {
+              identity: scopeStatus("identity.read", "identity"),
+              income: scopeStatus("income.read", "income"),
+              account_ownership: scopeStatus("accounts.read", "account_ownership"),
+              verification_status: scopeStatus("verification_status.read", "verification_status"),
+              consent_status: "active",
+              granted_scopes: grantedScopes,
+              updated_at: new Date().toISOString(),
+            } as Record<string, unknown>;
+            const job = db.prepare("SELECT j.verification_requirements FROM applications a JOIN jobs j ON j.id=a.job_id WHERE a.id=?").get(conn.application_id) as any;
+            const fieldByRequirement: Record<string, string> = { identity_verified: "identity", income_verification: "income", account_ownership: "account_ownership" };
+            const acceptable = new Set(["verified", "approved", "active"]);
+            const verificationComplete = jsonArray(job?.verification_requirements).every((requirement) => {
+              const field = fieldByRequirement[requirement];
+              return field ? acceptable.has(String(safeResult[field] ?? "").toLowerCase()) : false;
+            });
+            db.transaction(() => {
+              db.prepare("UPDATE verification_results SET result_json=?, updated_at=? WHERE application_id=?").run(JSON.stringify(safeResult), now(), conn.application_id);
+              db.prepare("UPDATE passid_connections SET last_webhook_event=?, updated_at=? WHERE id=?").run(type, now(), conn.id);
+              db.prepare("UPDATE applications SET status=?, updated_at=? WHERE id=?").run(verificationComplete ? "under_review" : "verification_required", now(), conn.application_id);
+              audit(db, conn.candidate_user_id, "passid.webhook.verification_result_ready", "application", conn.application_id, { verification_complete: verificationComplete });
+            })();
+          }
+        } catch (error) {
+          // Let PASSID retry the signed event instead of acknowledging a refresh that never happened.
+          db.prepare("DELETE FROM passid_webhook_events WHERE id=?").run(eventId);
+          console.warn("[passid webhook verification refresh failed]", { status: (error as any)?.status, requestId: (error as any)?.requestId });
+          return c.json({ error: "passid_verification_refresh_failed" }, 502);
+        }
       }
     }
     return c.json({ ok: true });

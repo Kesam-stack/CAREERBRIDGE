@@ -99,6 +99,10 @@ export function getEnvironmentIssues(source: Record<string, string | undefined> 
     if (env === "live" && payKey.startsWith("pay_test_")) issues.push("PASSID_PAY_SECRET_KEY: sandbox pay keys cannot be used in live mode");
     if (env === "sandbox" && payKey.startsWith("pay_live_")) issues.push("PASSID_PAY_SECRET_KEY: live pay keys cannot be used in sandbox mode");
   }
+  const payEnvironmentOverride = read(normalized, "PASSID_PAY_ENVIRONMENT");
+  if (payEnvironmentOverride && payEnvironmentOverride !== env) {
+    issues.push("PASSID_PAY_ENVIRONMENT: must match PASSID_ENVIRONMENT");
+  }
   const apiBase = read(normalized, "PASSID_API_BASE_URL").replace(/\/+$/, "");
   if (env === "sandbox" && /\/v1\/connect$/.test(apiBase)) {
     issues.push("PASSID_API_BASE_URL: production Connect URL cannot be used in sandbox mode");
@@ -107,6 +111,12 @@ export function getEnvironmentIssues(source: Record<string, string | undefined> 
     issues.push("PASSID_API_BASE_URL: sandbox Connect URL cannot be used in live mode");
   }
   return Array.from(new Set(issues));
+}
+
+function normalizePayBaseUrl(value: string): string {
+  const trimmed = value.replace(/\/+$/, "");
+  if (!trimmed) return "https://api.passid.io/v1/pay";
+  return /\/v1\/pay$/.test(trimmed) ? trimmed : `${trimmed}/v1/pay`;
 }
 
 export function loadEnv(source: Record<string, string | undefined> = process.env): CareerBridgeEnv {
@@ -133,10 +143,11 @@ export function loadEnv(source: Record<string, string | undefined> = process.env
     PASSID_ENVIRONMENT: passidEnvironment,
     PASSID_REDIRECT_URL: read(source, "PASSID_REDIRECT_URL") || "http://localhost:4100/api/passid/callback",
     PASSID_WEBHOOK_URL: read(source, "PASSID_WEBHOOK_URL") || "http://localhost:4100/api/webhooks/passid",
-    // PassID Pay is a separate product/key (pay_test_/pay_live_); same base URL in both environments.
+    // PassID Pay is a separate product/key (pay_test_/pay_live_); the dashboard may hand out
+    // PASSID_PAY_BASE_URL as a bare host, so normalize it to include the /v1/pay path.
     PASSID_PAY_ENABLED: (read(source, "PASSID_PAY_ENABLED") || read(source, "PASSID_PAY_PREVIEW_ENABLED")).toLowerCase() !== "false",
     PASSID_PAY_SECRET_KEY: read(source, "PASSID_PAY_SECRET_KEY"),
-    PASSID_PAY_API_BASE_URL: read(source, "PASSID_PAY_API_BASE_URL") || "https://api.passid.io/v1/pay",
+    PASSID_PAY_API_BASE_URL: normalizePayBaseUrl(read(source, "PASSID_PAY_BASE_URL") || read(source, "PASSID_PAY_API_BASE_URL")),
     RESEND_API_KEY: read(source, "RESEND_API_KEY"),
     PASSWORD_RESET_EMAIL_FROM: read(source, "PASSWORD_RESET_EMAIL_FROM"),
     PASSWORD_RESET_TEST_MODE: read(source, "PASSWORD_RESET_TEST_MODE")
