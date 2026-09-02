@@ -8,7 +8,7 @@ type User = { id: string; email: string; role: "candidate" | "employer" | "unive
 type Job = { id: string; title: string; organization_name: string; location: string; work_mode: string; employment_type: string; compensation: string; description: string; skills: string; verification_requirements: string[] };
 type Application = { id: string; title: string; organization_name?: string; candidate_name?: string; status: string; job_id: string };
 type PayReadiness = {
-  product: { mode: "private_preview" | "unavailable"; transfers_enabled: false; public_api_available: false };
+  product: { mode: "live" | "unavailable"; transfers_enabled: false; public_api_available: boolean };
   role: User["role"];
   summary: { total: number; verification_complete: number; needs_verification: number; attention_required: number };
   applications?: Array<{ id: string; title: string; organization_name: string; application_status: string; verification_state: string; identity_bound: boolean; consent_status: string }>;
@@ -177,7 +177,7 @@ function Shell({ auth, loading, children }: { auth: any; loading: boolean; child
           <NavLink to="/dashboard"><UserRoundCheck size={18} /> Candidate</NavLink>
           <NavLink to="/applications"><ClipboardList size={18} /> Applications</NavLink>
           <NavLink to="/verification"><ShieldCheck size={18} /> PASSID</NavLink>
-          <NavLink to="/pay"><WalletCards size={18} /> PASSID Pay <span className="nav-preview">Preview</span></NavLink>
+          <NavLink to="/pay"><WalletCards size={18} /> PASSID Pay</NavLink>
           <NavLink to="/employer/dashboard"><Building2 size={18} /> Employer</NavLink>
           <NavLink to="/admin/passid"><Webhook size={18} /> Admin monitor</NavLink>
         </nav>
@@ -560,13 +560,13 @@ function PassidPay({ auth }: { auth: any }) {
   return <section className="page pay-page">
     <div className="pay-hero">
       <div className="pay-hero-copy">
-        <div className="launch-status"><span className="status-dot" /> Private preview · Transfers disabled</div>
+        <div className="launch-status"><span className="status-dot" /> Official public API · Simulated settlement</div>
         <h1>Verified people.<br />Permissioned payouts.</h1>
-        <p>{isEmployer ? "Prepare verified candidates for a future payout experience built around explicit permission, institution controls, and an audit-ready trail." : "Move from verified hiring to payout onboarding with one identity candidates control and one consent trail institutions can trust."}</p>
+        <p>{isEmployer ? "Prepare verified candidates for payout authorization built around explicit permission, institution controls, and an audit-ready trail." : "Move from verified hiring to payout onboarding with one identity candidates control and one consent trail institutions can trust."}</p>
         <div className="hero-actions">
           {auth.user?.role === "candidate" && !verifiedApplication
             ? <Link className="button" to={candidateState.action}>{candidateState.actionLabel} <ChevronRight size={17} /></Link>
-            : <a className="button" href="https://passid.io/passid-pay" target="_blank" rel="noreferrer">Join the private-preview waitlist <ExternalLink size={17} /></a>}
+            : <a className="button" href="https://passid.io/passid-pay" target="_blank" rel="noreferrer">Learn about PASSID Pay <ExternalLink size={17} /></a>}
           {auth.user ? <Link className="button secondary" to={isEmployer ? "/applications" : "/settings"}>{isEmployer ? "Review applicants" : "Manage PASSID access"}</Link> : <Link className="button secondary" to="/login">Sign in</Link>}
         </div>
         <div className="trust-strip"><span><ShieldCheck size={15} /> Verified identity</span><span><LockKeyhole size={15} /> Explicit consent</span><span><ReceiptText size={15} /> Traceable authorization</span></div>
@@ -588,15 +588,15 @@ function PassidPay({ auth }: { auth: any }) {
         <div><span className="eyebrow">Your verified-payee path</span><h2>{candidateState.label}</h2><p>{candidateState.detail}</p></div>
         <Link className="button secondary" to={candidateState.action}>{candidateState.actionLabel} <ChevronRight size={16} /></Link>
       </div>
-      <div className="readiness-steps" aria-label="Future payout readiness steps">
+      <div className="readiness-steps" aria-label="Payout readiness steps">
         <div className={verifiedApplication ? "complete" : "current"}><span><CheckCircle2 size={18} /></span><div><small>Step 1</small><strong>Verify with PASSID</strong><p>Confirm required claims with active consent.</p></div></div>
-        <div className="locked"><span><Landmark size={18} /></span><div><small>Step 2 · Preview</small><strong>Authorize a destination</strong><p>Choose where an approved payout may be delivered.</p></div></div>
-        <div className="locked"><span><ArrowRightLeft size={18} /></span><div><small>Step 3 · Preview</small><strong>Approve each payout</strong><p>Review purpose and consent before funds move.</p></div></div>
+        <div className="locked"><span><Landmark size={18} /></span><div><small>Step 2</small><strong>Authorize a destination</strong><p>Consent to disclosure and confirm the payout destination on a payment intent.</p></div></div>
+        <div className="locked"><span><ArrowRightLeft size={18} /></span><div><small>Step 3</small><strong>Approve each payout</strong><p>Review purpose and consent before an institution executes a payment intent.</p></div></div>
       </div>
     </>}
 
     {!loading && isEmployer && readiness && <div className="operations-panel">
-      <div className="operations-heading"><div><span className="eyebrow">Payout operations preview</span><h2>Verified recipient pipeline</h2><p>A privacy-preserving view of readiness across applicants your organization is permitted to review.</p></div><span className="preview-seal">No financial data</span></div>
+      <div className="operations-heading"><div><span className="eyebrow">Payout operations</span><h2>Verified recipient pipeline</h2><p>A privacy-preserving view of readiness across applicants your organization is permitted to review.</p></div><span className="preview-seal">No financial data</span></div>
       <div className="operations-metrics">
         <div><span>Total applicants</span><strong>{readiness.summary.total}</strong><small>In your organization scope</small></div>
         <div><span>Verification complete</span><strong>{readiness.summary.verification_complete}</strong><small>Active evidence and consent</small></div>
@@ -608,16 +608,16 @@ function PassidPay({ auth }: { auth: any }) {
     {!auth.authLoading && !auth.user && <div className="guest-path"><div><span className="eyebrow">Designed for both sides</span><h2>One trusted handoff between work and pay.</h2></div><div className="guest-paths"><div><UserRoundCheck size={22} /><strong>For candidates</strong><p>Reuse verified identity and approve access deliberately.</p></div><div><Building2 size={22} /><strong>For institutions</strong><p>Prepare eligible recipients without exposing unnecessary personal data.</p></div></div></div>}
 
     <div className="pay-section-heading">
-      <span className="eyebrow">Planned capabilities</span>
+      <span className="eyebrow">How it works</span>
       <h2>One consent trail from identity to settlement.</h2>
-      <p>These capabilities describe the private-preview direction. They are not active payment features in CareerBridge today.</p>
+      <p>PASSID Pay is a public API (<code>/v1/pay</code>) available in both sandbox and live keys. Institutions authorize a payment intent, recipients consent to disclosure and confirm a destination, and execution issues a signed payment credential.</p>
     </div>
     <div className="grid-3">
       <div className="pay-feature"><Landmark size={24} /><span>01</span><h3>Verified payout rails</h3><p>Prepare a recipient whose identity and eligibility have already been verified through PASSID.</p></div>
       <div className="pay-feature"><ArrowRightLeft size={24} /><span>02</span><h3>Permissioned transfers</h3><p>Ask for explicit, purpose-specific customer authorization instead of retaining standing payment authority.</p></div>
-      <div className="pay-feature"><ReceiptText size={24} /><span>03</span><h3>Audit-ready settlement</h3><p>Associate each future transfer with the verified identity and consent record that authorized it.</p></div>
+      <div className="pay-feature"><ReceiptText size={24} /><span>03</span><h3>Audit-ready credential</h3><p>Each payout is bound to a signed, verifiable PassID Payment Credential tied to the verified identity that authorized it.</p></div>
     </div>
-    <div className="pay-disclosure"><LockKeyhole size={22} /><div><strong>Preview only—no funds move through CareerBridge.</strong><p>The server reports transfers as disabled. PASSID Pay currently has no public API, SDK, production endpoint, transaction engine, ledger, or payout rail; CareerBridge cannot create a payment.</p></div></div>
+    <div className="pay-disclosure"><LockKeyhole size={22} /><div><strong>Simulated settlement—no live funds move through CareerBridge.</strong><p>PASSID Pay executes against its real public API, but outcomes are reported as <code>simulated_completed</code>, not settlement, until PassID approves licensed production rails for this use case.</p></div></div>
   </section>;
 }
 
@@ -627,7 +627,7 @@ function EmployerDashboard({ auth }: { auth: any }) {
       <ActionCard icon={<BriefcaseBusiness />} title="Manage jobs" text="Create internships and full-time roles with explicit PASSID requirements." link="/employer/jobs" />
       <ActionCard icon={<UsersRound />} title="Applicants" text="Review candidates with only permitted verification results." link="/applications" />
       <ActionCard icon={<Layers3 />} title="Organization profile" text="Keep organization status and compliance details current." link="/employer/settings" />
-      <ActionCard icon={<WalletCards />} title="PASSID Pay" text="Preview permissioned payouts linked to verified candidate identities and consent." link="/pay" />
+      <ActionCard icon={<WalletCards />} title="PASSID Pay" text="Authorize permissioned payouts linked to verified candidate identities and consent." link="/pay" />
     </div>
   </section>;
 }

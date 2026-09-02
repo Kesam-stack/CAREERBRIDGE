@@ -22,7 +22,9 @@ const baseEnv: CareerBridgeEnv = {
   PASSID_ENVIRONMENT: "sandbox",
   PASSID_REDIRECT_URL: "https://api.careerbridge.test/api/passid/callback",
   PASSID_WEBHOOK_URL: "https://api.careerbridge.test/api/webhooks/passid",
-  PASSID_PAY_PREVIEW_ENABLED: true,
+  PASSID_PAY_ENABLED: true,
+  PASSID_PAY_SECRET_KEY: "pay_test_careerbridge_safe_test_key",
+  PASSID_PAY_API_BASE_URL: "https://api.passid.io/v1/pay",
   RESEND_API_KEY: "",
   PASSWORD_RESET_EMAIL_FROM: "",
   PASSWORD_RESET_TEST_MODE: false,
@@ -426,7 +428,7 @@ describe("CareerBridge independent PASSID institution app", () => {
     expect(JSON.stringify(body)).not.toContain(baseEnv.PASSID_SECRET_KEY);
   });
 
-  it("derives PASSID Pay preview readiness from active consent and verification evidence", async () => {
+  it("derives PASSID Pay readiness from active consent and verification evidence", async () => {
     const anonymous = await app.request("/api/passid/pay/readiness");
     expect(anonymous.status).toBe(401);
 
@@ -436,7 +438,7 @@ describe("CareerBridge independent PASSID institution app", () => {
     expect(pending.status).toBe(200);
     expect(pending.headers.get("cache-control")).toBe("private, no-store");
     const pendingBody = await pending.json() as any;
-    expect(pendingBody.product).toEqual({ mode: "private_preview", transfers_enabled: false, public_api_available: false });
+    expect(pendingBody.product).toEqual({ mode: "live", transfers_enabled: false, public_api_available: true });
     expect(pendingBody.summary.needs_verification).toBe(1);
     expect(pendingBody.applications[0].verification_state).toBe("needs_verification");
 

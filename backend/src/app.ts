@@ -8,6 +8,7 @@ import { join, normalize, extname } from "path";
 import { openCareerBridgeDb, type Role } from "./db";
 import { getEnvironmentIssues, loadEnv, safeVersion, type CareerBridgeEnv } from "./env";
 import { createPassidClient, type PassidClient } from "./passid";
+import { createPassidPayClient, type PassidPayClient } from "./passid-pay";
 import { createPkcePair, decryptSecret, encryptSecret, hashPassword, hmac, randomId, safeEqual, sanitizeScopes, verifyPassword } from "./security";
 
 const APPROVED_SCOPES = [
@@ -23,17 +24,11 @@ const REQUIREMENT_TO_SCOPE: Record<string, string> = {
   account_ownership: "accounts.read",
 };
 
-const PASSID_PAY_DEMO_BASE = "https://passid.io/api/pay/demo";
-const PASSID_PAY_DEMO_SCENARIOS = new Set([
-  "success", "identity_unsatisfied", "account_mismatch", "work_inactive", "credential_expired",
-  "recipient_declines", "destination_changed", "merchant_expired", "duplicate_execution", "provider_timeout",
-  "payment_failed", "payment_returned", "credential_revoked", "forged_webhook", "replayed_webhook", "cross_tenant",
-]);
-
 export interface AppOptions {
   env?: CareerBridgeEnv;
   db?: Database;
   passidClient?: PassidClient;
+  passidPayClient?: PassidPayClient;
 }
 
 type User = { id: string; email: string; role: Role; name: string; suspended_at?: number | null };
@@ -178,6 +173,7 @@ export function createCareerBridgeApp(options: AppOptions = {}) {
   const ownedDb = options.db ? null : openCareerBridgeDb(env.DATABASE_URL);
   const db = options.db ?? ownedDb!.db;
   const passid = options.passidClient ?? createPassidClient(env);
+  const passidPay = options.passidPayClient ?? (env.PASSID_PAY_SECRET_KEY ? createPassidPayClient(env) : null);
   const app = new Hono();
   const passwordResetTestMode = env.PASSWORD_RESET_TEST_MODE && env.PASSID_ENVIRONMENT === "sandbox";
 
@@ -586,9 +582,10 @@ export function createCareerBridgeApp(options: AppOptions = {}) {
     c.header("Cache-Control", "private, no-store");
 
     const product = {
-      mode: env.PASSID_PAY_PREVIEW_ENABLED ? "private_preview" : "unavailable",
+      mode: env.PASSID_PAY_ENABLED && passidPay ? "live" : "unavailable",
+      // PassID Pay's own docs: execution is simulated_completed everywhere until licensed rails are approved.
       transfers_enabled: false,
-      public_api_available: false,
+      public_api_available: env.PASSID_PAY_ENABLED,
     } as const;
 
     const readinessRows = user.role === "candidate"
@@ -640,110 +637,42 @@ export function createCareerBridgeApp(options: AppOptions = {}) {
     return c.json({ product, role: user.role, summary, applications: user.role === "candidate" ? applications : undefined });
   });
 
-  app.get("/api/passid/pay/sandbox", async (c) => {
+  app.get("/api/passid/pay/intents", async (c) => {
     const user = await requireUser(c, ["candidate", "employer", "admin"]);
     if (user instanceof Response) return user;
-    if (!env.PASSID_PAY_PREVIEW_ENABLED) return c.json({ error: "pay_sandbox_disabled" }, 404);
     c.header("Cache-Control", "private, no-store");
-    const transfers = user.role === "candidate"
+    const intents = user.role === "candidate"
       ? db.prepare(`
-          SELECT pst.id,pst.amount_minor,pst.currency,pst.purpose,pst.status,pst.created_at,pst.updated_at,
-            j.title,o.name AS organization_name,psr.destination_type,psr.destination_label
-          FROM pay_sandbox_transfers pst
-          JOIN pay_sandbox_recipients psr ON psr.id=pst.recipient_id
-          JOIN applications a ON a.id=pst.application_id
-          JOIN jobs j ON j.id=a.job_id JOIN organizations o ON o.id=pst.organization_id
-          WHERE psr.candidate_user_id=? ORDER BY pst.created_at DESC
+          SELECT ppi.id,ppi.amount_minor,ppi.currency,ppi.purpose,ppi.status,ppi.hosted_url,ppi.created_at,ppi.updated_at,
+            j.title,o.name AS organization_name
+          FROM pay_payment_intents ppi
+          JOIN applications a ON a.id=ppi.application_id
+          JOIN jobs j ON j.id=a.job_id JOIN organizations o ON o.id=ppi.organization_id
+          WHERE ppi.candidate_user_id=? ORDER BY ppi.created_at DESC
         `).all(user.id)
       : db.prepare(`
-          SELECT pst.id,pst.amount_minor,pst.currency,pst.purpose,pst.status,pst.created_at,pst.updated_at,
-            j.title,o.name AS organization_name,u.name AS candidate_name,psr.destination_type,psr.destination_label
-          FROM pay_sandbox_transfers pst
-          JOIN pay_sandbox_recipients psr ON psr.id=pst.recipient_id
-          JOIN applications a ON a.id=pst.application_id
-          JOIN jobs j ON j.id=a.job_id JOIN organizations o ON o.id=pst.organization_id
-          JOIN users u ON u.id=psr.candidate_user_id
-          WHERE (?='admin' OR o.owner_user_id=?) ORDER BY pst.created_at DESC
+          SELECT ppi.id,ppi.amount_minor,ppi.currency,ppi.purpose,ppi.status,ppi.created_at,ppi.updated_at,
+            j.title,o.name AS organization_name,u.name AS candidate_name
+          FROM pay_payment_intents ppi
+          JOIN applications a ON a.id=ppi.application_id
+          JOIN jobs j ON j.id=a.job_id JOIN organizations o ON o.id=ppi.organization_id
+          JOIN users u ON u.id=ppi.candidate_user_id
+          WHERE (?='admin' OR o.owner_user_id=?) ORDER BY ppi.created_at DESC
         `).all(user.role, user.id);
-    const recipients = user.role === "candidate"
-      ? db.prepare(`SELECT psr.id,psr.application_id,psr.destination_type,psr.destination_label,psr.status,psr.consented_at,j.title,o.name AS organization_name
-          FROM pay_sandbox_recipients psr JOIN applications a ON a.id=psr.application_id
-          JOIN jobs j ON j.id=a.job_id JOIN organizations o ON o.id=j.organization_id
-          WHERE psr.candidate_user_id=? ORDER BY psr.created_at DESC`).all(user.id)
-      : [];
     return c.json({
-      environment: "careerbridge_simulator",
-      synthetic_data_only: true,
+      environment: env.PASSID_ENVIRONMENT,
+      // PassID Pay's own docs: no live funds move regardless of environment yet.
       transfers_enabled: false,
-      recipients,
-      transfers,
+      intents,
     });
   });
 
-  app.post("/api/passid/pay/sandbox/recipients", async (c) => {
-    const user = await requireUser(c, ["candidate"]);
-    if (user instanceof Response) return user;
-    const csrf = await requireCsrf(c);
-    if (csrf) return csrf;
-    if (!env.PASSID_PAY_PREVIEW_ENABLED) return c.json({ error: "pay_sandbox_disabled" }, 404);
-    const parsed = z.object({
-      application_id: z.string().min(1).max(100),
-      destination_type: z.enum(["sandbox_bank", "sandbox_wallet"]),
-      consent: z.literal(true),
-    }).safeParse(await c.req.json().catch(() => null));
-    if (!parsed.success) return c.json({ error: "invalid_sandbox_recipient", fields: parsed.error.flatten().fieldErrors }, 400);
-    const row = db.prepare(`
-      SELECT a.id,a.status AS application_status,j.title,o.name AS organization_name,j.verification_requirements,
-        pc.status AS connection_status,pc.consent_status,pc.expires_at,vr.result_json,
-        CASE WHEN psb.candidate_user_id IS NULL THEN 0 ELSE 1 END AS identity_bound
-      FROM applications a JOIN jobs j ON j.id=a.job_id JOIN organizations o ON o.id=j.organization_id
-      LEFT JOIN passid_connections pc ON pc.id=(SELECT latest.id FROM passid_connections latest WHERE latest.application_id=a.id AND latest.candidate_user_id=a.candidate_user_id ORDER BY latest.updated_at DESC LIMIT 1)
-      LEFT JOIN verification_results vr ON vr.application_id=a.id
-      LEFT JOIN passid_subject_bindings psb ON psb.candidate_user_id=a.candidate_user_id AND psb.status='bound'
-      WHERE a.id=? AND a.candidate_user_id=?
-    `).get(parsed.data.application_id, user.id) as any;
-    if (!row) return c.json({ error: "application_not_found" }, 404);
-    if (payReadinessFromRow(row).verification_state !== "verification_complete") return c.json({ error: "passid_verification_required" }, 409);
-    const existing = db.prepare("SELECT id FROM pay_sandbox_recipients WHERE application_id=?").get(row.id) as any;
-    const recipientId = existing?.id ?? randomId("psr_sandbox");
-    const destinationLabel = parsed.data.destination_type === "sandbox_bank" ? "Synthetic bank ••4242" : "Synthetic wallet ••8080";
-    const timestamp = now();
-    db.transaction(() => {
-      db.prepare(`INSERT INTO pay_sandbox_recipients (id,application_id,candidate_user_id,destination_type,destination_label,status,consented_at,created_at,updated_at)
-        VALUES (?,?,?,?,?,'active',?,?,?) ON CONFLICT(application_id) DO UPDATE SET destination_type=excluded.destination_type,destination_label=excluded.destination_label,status='active',consented_at=excluded.consented_at,updated_at=excluded.updated_at`)
-        .run(recipientId, row.id, user.id, parsed.data.destination_type, destinationLabel, timestamp, timestamp, timestamp);
-      db.prepare("INSERT INTO pay_sandbox_events (id,recipient_id,type,actor_user_id,payload_summary,created_at) VALUES (?,?,?,?,?,?)")
-        .run(randomId("psevt_sandbox"), recipientId, "recipient.destination_consented", user.id, JSON.stringify({ destination_type: parsed.data.destination_type, synthetic: true }), timestamp);
-      audit(db, user.id, "pay.sandbox.recipient.consent", "application", row.id, { destination_type: parsed.data.destination_type, synthetic: true });
-    })();
-    return c.json({ id: recipientId, status: "active", destination_type: parsed.data.destination_type, destination_label: destinationLabel, synthetic: true }, existing ? 200 : 201);
-  });
-
-  app.post("/api/passid/pay/sandbox/recipients/:id/revoke", async (c) => {
-    const user = await requireUser(c, ["candidate"]);
-    if (user instanceof Response) return user;
-    const csrf = await requireCsrf(c);
-    if (csrf) return csrf;
-    const recipient = db.prepare("SELECT id,status FROM pay_sandbox_recipients WHERE id=? AND candidate_user_id=?").get(c.req.param("id"), user.id) as any;
-    if (!recipient) return c.json({ error: "sandbox_recipient_not_found" }, 404);
-    if (recipient.status === "revoked") return c.json({ ok: true, status: "revoked", already_revoked: true });
-    const timestamp = now();
-    db.transaction(() => {
-      db.prepare("UPDATE pay_sandbox_recipients SET status='revoked',updated_at=? WHERE id=?").run(timestamp, recipient.id);
-      db.prepare("UPDATE pay_sandbox_transfers SET status='canceled',updated_at=? WHERE recipient_id=? AND status='requires_recipient_consent'").run(timestamp, recipient.id);
-      db.prepare("INSERT INTO pay_sandbox_events (id,recipient_id,type,actor_user_id,payload_summary,created_at) VALUES (?,?,?,?,?,?)")
-        .run(randomId("psevt_sandbox"), recipient.id, "recipient.destination_revoked", user.id, JSON.stringify({ synthetic: true }), timestamp);
-      audit(db, user.id, "pay.sandbox.recipient.revoke", "recipient", recipient.id, { synthetic: true });
-    })();
-    return c.json({ ok: true, status: "revoked" });
-  });
-
-  app.post("/api/passid/pay/sandbox/transfers", async (c) => {
+  app.post("/api/passid/pay/intents", async (c) => {
     const user = await requireUser(c, ["employer", "admin"]);
     if (user instanceof Response) return user;
     const csrf = await requireCsrf(c);
     if (csrf) return csrf;
-    if (!env.PASSID_PAY_PREVIEW_ENABLED) return c.json({ error: "pay_sandbox_disabled" }, 404);
+    if (!env.PASSID_PAY_ENABLED || !passidPay) return c.json({ error: "pay_not_configured" }, 404);
     const parsed = z.object({
       application_id: z.string().min(1).max(100),
       amount_minor: z.number().int().min(1).max(100000000),
@@ -751,73 +680,139 @@ export function createCareerBridgeApp(options: AppOptions = {}) {
       purpose: z.string().trim().min(3).max(160),
       idempotency_key: z.string().trim().min(8).max(100).regex(/^[A-Za-z0-9._:-]+$/),
     }).safeParse(await c.req.json().catch(() => null));
-    if (!parsed.success) return c.json({ error: "invalid_sandbox_transfer", fields: parsed.error.flatten().fieldErrors }, 400);
-    const target = db.prepare(`SELECT a.id,a.candidate_user_id,j.organization_id,o.owner_user_id,psr.id AS recipient_id,psr.status AS recipient_status
+    if (!parsed.success) return c.json({ error: "invalid_payment_intent", fields: parsed.error.flatten().fieldErrors }, 400);
+    const row = db.prepare(`
+      SELECT a.id,a.candidate_user_id,j.organization_id,o.owner_user_id,a.status AS application_status,j.title,o.name AS organization_name,j.verification_requirements,
+        pc.status AS connection_status,pc.consent_status,pc.expires_at,vr.result_json,
+        CASE WHEN psb.candidate_user_id IS NULL THEN 0 ELSE 1 END AS identity_bound
       FROM applications a JOIN jobs j ON j.id=a.job_id JOIN organizations o ON o.id=j.organization_id
-      LEFT JOIN pay_sandbox_recipients psr ON psr.application_id=a.id
-      WHERE a.id=?`).get(parsed.data.application_id) as any;
-    if (!target || (user.role !== "admin" && target.owner_user_id !== user.id)) return c.json({ error: "application_not_found" }, 404);
-    if (!target.recipient_id || target.recipient_status !== "active") return c.json({ error: "sandbox_recipient_not_ready" }, 409);
-    const replay = db.prepare("SELECT id,status FROM pay_sandbox_transfers WHERE organization_id=? AND idempotency_key=?").get(target.organization_id, parsed.data.idempotency_key) as any;
-    if (replay) return c.json({ ...replay, replayed: true, synthetic: true });
-    const transferId = randomId("pst_sandbox");
+      LEFT JOIN passid_connections pc ON pc.id=(SELECT latest.id FROM passid_connections latest WHERE latest.application_id=a.id AND latest.candidate_user_id=a.candidate_user_id ORDER BY latest.updated_at DESC LIMIT 1)
+      LEFT JOIN verification_results vr ON vr.application_id=a.id
+      LEFT JOIN passid_subject_bindings psb ON psb.candidate_user_id=a.candidate_user_id AND psb.status='bound'
+      WHERE a.id=?
+    `).get(parsed.data.application_id) as any;
+    if (!row || (user.role !== "admin" && row.owner_user_id !== user.id)) return c.json({ error: "application_not_found" }, 404);
+    if (payReadinessFromRow(row).verification_state !== "verification_complete") return c.json({ error: "passid_verification_required" }, 409);
+    const replay = db.prepare("SELECT id,passid_intent_id,status,hosted_url FROM pay_payment_intents WHERE organization_id=? AND idempotency_key=?").get(row.organization_id, parsed.data.idempotency_key) as any;
+    if (replay) return c.json({ ...replay, replayed: true });
+    let created;
+    try {
+      created = await passidPay.createPaymentIntent({
+        amount: parsed.data.amount_minor,
+        currency: parsed.data.currency,
+        purpose: parsed.data.purpose,
+        idempotency_key: parsed.data.idempotency_key,
+      });
+    } catch (error) {
+      console.error("[passid pay intent create failed]", { requestId: (error as any)?.requestId, status: (error as any)?.status });
+      return c.json({ error: "passid_pay_unavailable" }, 502);
+    }
+    const localId = randomId("ppi");
     const timestamp = now();
     db.transaction(() => {
-      db.prepare(`INSERT INTO pay_sandbox_transfers (id,organization_id,application_id,recipient_id,created_by_user_id,amount_minor,currency,purpose,status,idempotency_key,created_at,updated_at)
-        VALUES (?,?,?,?,?,?,?,?,'requires_recipient_consent',?,?,?)`)
-        .run(transferId, target.organization_id, target.id, target.recipient_id, user.id, parsed.data.amount_minor, parsed.data.currency, parsed.data.purpose, parsed.data.idempotency_key, timestamp, timestamp);
-      db.prepare("INSERT INTO pay_sandbox_events (id,transfer_id,recipient_id,type,actor_user_id,payload_summary,created_at) VALUES (?,?,?,?,?,?,?)")
-        .run(randomId("psevt_sandbox"), transferId, target.recipient_id, "transfer.created", user.id, JSON.stringify({ amount_minor: parsed.data.amount_minor, currency: "USD", synthetic: true }), timestamp);
-      audit(db, user.id, "pay.sandbox.transfer.create", "transfer", transferId, { amount_minor: parsed.data.amount_minor, currency: "USD", synthetic: true });
+      db.prepare(`INSERT INTO pay_payment_intents (id,passid_intent_id,organization_id,application_id,candidate_user_id,created_by_user_id,amount_minor,currency,purpose,status,hosted_url,idempotency_key,created_at,updated_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+        .run(localId, created.id, row.organization_id, row.id, row.candidate_user_id, user.id, parsed.data.amount_minor, parsed.data.currency, parsed.data.purpose, "requires_consent", created.hosted_url ?? null, parsed.data.idempotency_key, timestamp, timestamp);
+      db.prepare("INSERT INTO pay_payment_events (id,payment_intent_id,type,actor_user_id,payload_summary,created_at) VALUES (?,?,?,?,?,?)")
+        .run(randomId("ppevt"), localId, "intent.created", user.id, JSON.stringify({ amount_minor: parsed.data.amount_minor, currency: "USD" }), timestamp);
+      audit(db, user.id, "pay.intent.create", "payment_intent", localId, { amount_minor: parsed.data.amount_minor, currency: "USD", passid_intent_id: created.id });
     })();
-    return c.json({ id: transferId, status: "requires_recipient_consent", synthetic: true }, 201);
+    return c.json({ id: localId, passid_intent_id: created.id, status: "requires_consent", hosted_url: created.hosted_url ?? null }, 201);
   });
 
-  app.post("/api/passid/pay/sandbox/transfers/:id/consent", async (c) => {
+  app.post("/api/passid/pay/intents/:id/consent", async (c) => {
     const user = await requireUser(c, ["candidate"]);
     if (user instanceof Response) return user;
     const csrf = await requireCsrf(c);
     if (csrf) return csrf;
-    const parsed = z.object({ decision: z.enum(["approve", "decline"]) }).safeParse(await c.req.json().catch(() => null));
-    if (!parsed.success) return c.json({ error: "invalid_sandbox_consent" }, 400);
-    const transfer = db.prepare(`SELECT pst.id,pst.status,pst.recipient_id FROM pay_sandbox_transfers pst
-      JOIN pay_sandbox_recipients psr ON psr.id=pst.recipient_id WHERE pst.id=? AND psr.candidate_user_id=?`).get(c.req.param("id"), user.id) as any;
-    if (!transfer) return c.json({ error: "sandbox_transfer_not_found" }, 404);
-    if (transfer.status !== "requires_recipient_consent") return c.json({ error: "sandbox_transfer_not_awaiting_consent", status: transfer.status }, 409);
-    const status = parsed.data.decision === "approve" ? "processing" : "declined";
+    if (!env.PASSID_PAY_ENABLED || !passidPay) return c.json({ error: "pay_not_configured" }, 404);
+    const parsed = z.object({ approved: z.boolean(), confirm_destination: z.boolean() }).safeParse(await c.req.json().catch(() => null));
+    if (!parsed.success) return c.json({ error: "invalid_pay_consent" }, 400);
+    const intent = db.prepare("SELECT id,passid_intent_id,status FROM pay_payment_intents WHERE id=? AND candidate_user_id=?").get(c.req.param("id"), user.id) as any;
+    if (!intent) return c.json({ error: "payment_intent_not_found" }, 404);
+    if (intent.status !== "requires_consent") return c.json({ error: "payment_intent_not_awaiting_consent", status: intent.status }, 409);
+    let result;
+    try {
+      result = await passidPay.consent(intent.passid_intent_id, { approved: parsed.data.approved, confirm_destination: parsed.data.confirm_destination });
+    } catch (error) {
+      console.error("[passid pay consent failed]", { requestId: (error as any)?.requestId, status: (error as any)?.status });
+      return c.json({ error: "passid_pay_unavailable" }, 502);
+    }
+    const status = parsed.data.approved ? "ready_to_execute" : "consent_declined";
     const timestamp = now();
     db.transaction(() => {
-      db.prepare("UPDATE pay_sandbox_transfers SET status=?,consented_at=?,updated_at=? WHERE id=?").run(status, timestamp, timestamp, transfer.id);
-      db.prepare("INSERT INTO pay_sandbox_events (id,transfer_id,recipient_id,type,actor_user_id,payload_summary,created_at) VALUES (?,?,?,?,?,?,?)")
-        .run(randomId("psevt_sandbox"), transfer.id, transfer.recipient_id, `transfer.${status}`, user.id, JSON.stringify({ synthetic: true }), timestamp);
-      audit(db, user.id, `pay.sandbox.transfer.${status}`, "transfer", transfer.id, { synthetic: true });
+      db.prepare("UPDATE pay_payment_intents SET status=?,consented_at=?,updated_at=? WHERE id=?").run(status, timestamp, timestamp, intent.id);
+      db.prepare("INSERT INTO pay_payment_events (id,payment_intent_id,type,actor_user_id,payload_summary,created_at) VALUES (?,?,?,?,?,?)")
+        .run(randomId("ppevt"), intent.id, `intent.${status}`, user.id, JSON.stringify({ approved: parsed.data.approved }), timestamp);
+      audit(db, user.id, `pay.intent.${status}`, "payment_intent", intent.id, { approved: parsed.data.approved });
     })();
-    return c.json({ id: transfer.id, status, synthetic: true });
+    return c.json({ id: intent.id, status, passid_status: result.status });
   });
 
-  app.post("/api/passid/pay/sandbox/transfers/:id/simulate", async (c) => {
+  app.post("/api/passid/pay/intents/:id/confirm-destination", async (c) => {
+    const user = await requireUser(c, ["candidate"]);
+    if (user instanceof Response) return user;
+    const csrf = await requireCsrf(c);
+    if (csrf) return csrf;
+    if (!env.PASSID_PAY_ENABLED || !passidPay) return c.json({ error: "pay_not_configured" }, 404);
+    const intent = db.prepare("SELECT id,passid_intent_id FROM pay_payment_intents WHERE id=? AND candidate_user_id=?").get(c.req.param("id"), user.id) as any;
+    if (!intent) return c.json({ error: "payment_intent_not_found" }, 404);
+    try {
+      const result = await passidPay.confirmDestination(intent.passid_intent_id);
+      audit(db, user.id, "pay.intent.confirm_destination", "payment_intent", intent.id, {});
+      return c.json({ id: intent.id, passid_status: result.status });
+    } catch (error) {
+      console.error("[passid pay confirm destination failed]", { requestId: (error as any)?.requestId, status: (error as any)?.status });
+      return c.json({ error: "passid_pay_unavailable" }, 502);
+    }
+  });
+
+  app.post("/api/passid/pay/intents/:id/execute", async (c) => {
     const user = await requireUser(c, ["employer", "admin"]);
     if (user instanceof Response) return user;
     const csrf = await requireCsrf(c);
     if (csrf) return csrf;
-    const parsed = z.object({ outcome: z.enum(["settled", "failed", "returned", "canceled"]) }).safeParse(await c.req.json().catch(() => null));
-    if (!parsed.success) return c.json({ error: "invalid_sandbox_outcome" }, 400);
-    const transfer = db.prepare(`SELECT pst.id,pst.status,pst.recipient_id,o.owner_user_id FROM pay_sandbox_transfers pst
-      JOIN organizations o ON o.id=pst.organization_id WHERE pst.id=?`).get(c.req.param("id")) as any;
-    if (!transfer || (user.role !== "admin" && transfer.owner_user_id !== user.id)) return c.json({ error: "sandbox_transfer_not_found" }, 404);
-    const allowed = (transfer.status === "processing" && ["settled", "failed"].includes(parsed.data.outcome))
-      || (transfer.status === "settled" && parsed.data.outcome === "returned")
-      || (transfer.status === "requires_recipient_consent" && parsed.data.outcome === "canceled");
-    if (!allowed) return c.json({ error: "invalid_sandbox_transition", status: transfer.status, requested_outcome: parsed.data.outcome }, 409);
+    if (!env.PASSID_PAY_ENABLED || !passidPay) return c.json({ error: "pay_not_configured" }, 404);
+    const intent = db.prepare(`SELECT ppi.id,ppi.passid_intent_id,ppi.status,o.owner_user_id FROM pay_payment_intents ppi JOIN organizations o ON o.id=ppi.organization_id WHERE ppi.id=?`).get(c.req.param("id")) as any;
+    if (!intent || (user.role !== "admin" && intent.owner_user_id !== user.id)) return c.json({ error: "payment_intent_not_found" }, 404);
+    if (intent.status !== "ready_to_execute") return c.json({ error: "payment_intent_not_ready", status: intent.status }, 409);
+    let result;
+    try {
+      result = await passidPay.execute(intent.passid_intent_id);
+    } catch (error) {
+      const timestamp = now();
+      db.prepare("UPDATE pay_payment_intents SET status='failed',updated_at=? WHERE id=?").run(timestamp, intent.id);
+      console.error("[passid pay execute failed]", { requestId: (error as any)?.requestId, status: (error as any)?.status });
+      return c.json({ error: "passid_pay_execute_failed" }, 502);
+    }
+    const status = result.status === "simulated_completed" ? "simulated_completed" : "failed";
     const timestamp = now();
     db.transaction(() => {
-      db.prepare("UPDATE pay_sandbox_transfers SET status=?,settled_at=?,updated_at=? WHERE id=?")
-        .run(parsed.data.outcome, parsed.data.outcome === "settled" ? timestamp : null, timestamp, transfer.id);
-      db.prepare("INSERT INTO pay_sandbox_events (id,transfer_id,recipient_id,type,actor_user_id,payload_summary,created_at) VALUES (?,?,?,?,?,?,?)")
-        .run(randomId("psevt_sandbox"), transfer.id, transfer.recipient_id, `transfer.${parsed.data.outcome}`, user.id, JSON.stringify({ synthetic: true }), timestamp);
-      audit(db, user.id, `pay.sandbox.transfer.${parsed.data.outcome}`, "transfer", transfer.id, { synthetic: true });
+      db.prepare("UPDATE pay_payment_intents SET status=?,credential_id=?,executed_at=?,updated_at=? WHERE id=?")
+        .run(status, result.credential_id ?? null, timestamp, timestamp, intent.id);
+      db.prepare("INSERT INTO pay_payment_events (id,payment_intent_id,type,actor_user_id,payload_summary,created_at) VALUES (?,?,?,?,?,?)")
+        .run(randomId("ppevt"), intent.id, "intent.executed", user.id, JSON.stringify({ status, credential_id: result.credential_id ?? null }), timestamp);
+      audit(db, user.id, "pay.intent.execute", "payment_intent", intent.id, { status });
     })();
-    return c.json({ id: transfer.id, status: parsed.data.outcome, synthetic: true });
+    return c.json({ id: intent.id, status, credential_id: result.credential_id ?? null });
+  });
+
+  app.get("/api/passid/pay/intents/:id/events", async (c) => {
+    const user = await requireUser(c, ["candidate", "employer", "admin"]);
+    if (user instanceof Response) return user;
+    if (!env.PASSID_PAY_ENABLED || !passidPay) return c.json({ error: "pay_not_configured" }, 404);
+    const intent = db.prepare(`SELECT ppi.id,ppi.passid_intent_id,ppi.candidate_user_id,o.owner_user_id
+      FROM pay_payment_intents ppi JOIN organizations o ON o.id=ppi.organization_id WHERE ppi.id=?`).get(c.req.param("id")) as any;
+    if (!intent) return c.json({ error: "payment_intent_not_found" }, 404);
+    const allowed = user.role === "admin" || intent.owner_user_id === user.id || intent.candidate_user_id === user.id;
+    if (!allowed) return c.json({ error: "payment_intent_not_found" }, 404);
+    try {
+      const events = await passidPay.listEvents(intent.passid_intent_id);
+      return c.json({ events });
+    } catch (error) {
+      console.error("[passid pay events fetch failed]", { requestId: (error as any)?.requestId, status: (error as any)?.status });
+      return c.json({ error: "passid_pay_unavailable" }, 502);
+    }
   });
 
   app.get("/api/employer/applicants/:id", async (c) => {

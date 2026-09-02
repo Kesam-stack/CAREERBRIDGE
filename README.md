@@ -85,7 +85,9 @@ PASSID_WEBHOOK_SECRET=
 PASSID_ENVIRONMENT=sandbox
 PASSID_REDIRECT_URL=
 PASSID_WEBHOOK_URL=
-PASSID_PAY_PREVIEW_ENABLED=true
+PASSID_PAY_ENABLED=true
+PASSID_PAY_SECRET_KEY=
+PASSID_PAY_API_BASE_URL=https://api.passid.io/v1/pay
 PASSWORD_RESET_TEST_MODE=true # optional; defaults to true in PASSID sandbox mode
 RESEND_API_KEY=
 PASSWORD_RESET_EMAIL_FROM="CareerBridge <security@your-domain.example>"
@@ -99,6 +101,8 @@ ENCRYPTION_KEY=
 The login screen provides a direct password-change form for the three seeded CareerBridge demo accounts. It accepts the demo account, new password, and confirmation in one container; it sends no email and creates no reset link. The endpoint is ID-restricted to `candidate_demo`, `employer_demo`, and `admin_demo`, rate-limited, audited, and revokes existing sessions. The token-based endpoints remain available for future recovery of real registered accounts when email delivery is configured.
 
 For approved live access, set `PASSID_CONNECT_BASE=https://api.passid.io/v1/connect`. `PASSID_ENVIRONMENT=live` rejects `sk_test_` keys, and sandbox mode rejects live keys or the production Connect URL. The older `PASSID_API_BASE_URL` and `PASSID_SECRET_KEY` names remain supported during migration.
+
+PASSID Pay (https://passid.io/integration-guide#guide-pay) is a separate product and key from Connect. Mint a `pay_test_…` or `pay_live_…` key in the PassID dashboard under PassID Pay and set it as `PASSID_PAY_SECRET_KEY`; both key types call the same public `https://api.passid.io/v1/pay` base URL, with the environment selected by the key itself. Per PassID's own docs, payment intent execution always reports `simulated_completed`, not real settlement, until PassID approves licensed production rails for a given use case — so CareerBridge never claims funds actually move. Set `PASSID_PAY_ENABLED=false` to disable the feature entirely; without a configured `PASSID_PAY_SECRET_KEY`, CareerBridge's Pay routes respond with `pay_not_configured`.
 
 PASSID derives your registered institution from `PASSID_CONNECT_KEY`; do not send or hard-code an institution ID. Public CareerBridge signup creates candidate or pending employer accounts only. Institution workspace access remains in PASSID's institution portal.
 
