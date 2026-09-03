@@ -104,6 +104,8 @@ export function migrate(db: Database): void {
     amount_minor INTEGER NOT NULL CHECK(amount_minor > 0 AND amount_minor <= 100000000),
     currency TEXT NOT NULL CHECK(currency='USD'),
     purpose TEXT NOT NULL,
+    destination_id TEXT,
+    policy_id TEXT,
     status TEXT NOT NULL CHECK(status IN ('requires_consent','ready_to_execute','consent_declined','simulated_completed','failed')),
     hosted_url TEXT,
     credential_id TEXT,
@@ -114,6 +116,11 @@ export function migrate(db: Database): void {
     updated_at INTEGER NOT NULL,
     UNIQUE(organization_id,idempotency_key)
   )`);
+  const payIntentColumns = new Set((db.prepare("PRAGMA table_info(pay_payment_intents)").all() as any[]).map((column) => String(column.name)));
+  if (!payIntentColumns.has("destination_id")) db.run("ALTER TABLE pay_payment_intents ADD COLUMN destination_id TEXT");
+  if (!payIntentColumns.has("policy_id")) db.run("ALTER TABLE pay_payment_intents ADD COLUMN policy_id TEXT");
+  if (!payIntentColumns.has("credential_verified")) db.run("ALTER TABLE pay_payment_intents ADD COLUMN credential_verified INTEGER");
+  if (!payIntentColumns.has("credential_status")) db.run("ALTER TABLE pay_payment_intents ADD COLUMN credential_status TEXT");
   db.run(`CREATE TABLE IF NOT EXISTS pay_payment_events (
     id TEXT PRIMARY KEY,
     payment_intent_id TEXT NOT NULL REFERENCES pay_payment_intents(id),

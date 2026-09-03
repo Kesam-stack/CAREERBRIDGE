@@ -579,6 +579,8 @@ function PassidPay({ auth }: { auth: any }) {
       amount_minor: Math.round(amountDollars * 100),
       currency: "USD",
       purpose: String(fd.get("purpose") ?? ""),
+      destination_id: String(fd.get("destination_id") ?? ""),
+      policy_id: String(fd.get("policy_id") ?? ""),
       idempotency_key: `pay-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
     };
     const res = await api("/api/passid/pay/intents", { method: "POST", body: JSON.stringify(payload) }, auth.csrf);
@@ -763,8 +765,10 @@ function PassidPay({ auth }: { auth: any }) {
         </select>
         <input name="amount" type="number" min="0.01" step="0.01" placeholder="Amount (USD)" required />
         <input name="purpose" placeholder="Purpose (e.g. contractor_payout)" minLength={3} maxLength={160} required />
+        <input name="destination_id" placeholder="Verified destination ID (dst_…)" minLength={3} maxLength={160} required />
+        <input name="policy_id" placeholder="PASSID policy ID" minLength={3} maxLength={160} required />
         <button className="button" type="submit">Create payment intent</button>
-        <small>Only applications with completed PASSID verification will be accepted; PassID rejects the rest with `passid_verification_required`.</small>
+        <small>Creation uses the applicant’s active Connect relationship, then records merchant authorization before recipient consent.</small>
       </form>}
       {intents.length ? <div className="table">{intents.map((intent) => <div className="table-row" key={intent.id}>
         <span>{intent.title ?? intent.id}</span>
@@ -790,7 +794,7 @@ function PassidPay({ auth }: { auth: any }) {
       <div className="pay-feature"><ArrowRightLeft size={24} /><span>02</span><h3>Permissioned transfers</h3><p>Ask for explicit, purpose-specific customer authorization instead of retaining standing payment authority.</p></div>
       <div className="pay-feature"><ReceiptText size={24} /><span>03</span><h3>Audit-ready credential</h3><p>Each payout is bound to a signed, verifiable PassID Payment Credential tied to the verified identity that authorized it.</p></div>
     </div>
-    <div className="pay-disclosure"><LockKeyhole size={22} /><div><strong>Simulated settlement—no live funds move through CareerBridge.</strong><p>PASSID Pay executes against its real public API, but outcomes are reported as <code>simulated_completed</code>, not settlement, until PassID approves licensed production rails for this use case.</p></div></div>
+    <div className="pay-disclosure"><LockKeyhole size={22} /><div><strong>Simulated settlement—no live funds move through CareerBridge.</strong><p>PASSID Pay executes against its public API and reports a <code>completed</code> outcome, but the sandbox and current trust-layer-only live mode do not represent bank settlement.</p></div></div>
   </section>;
 }
 

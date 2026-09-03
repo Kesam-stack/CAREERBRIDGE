@@ -462,6 +462,96 @@ describe("CareerBridge independent PASSID institution app", () => {
     expect(JSON.stringify(employerBody)).not.toContain("subject_hash_pay");
   });
 
+  it("creates, authorizes, consents, executes, and verifies a PASSID Pay intent", async () => {
+    const payDb = new Database(":memory:");
+    migrate(payDb);
+    seed(payDb);
+    let createInput: any;
+    let merchantAuthorized = false;
+    const created = createCareerBridgeApp({
+      env: baseEnv,
+      db: payDb,
+      passidClient: mockPassid(),
+      passidPayClient: {
+        async createPaymentIntent(input) {
+          createInput = input;
+          return { id: "pi_contract_123", hosted_url: "https://app.passid.io/pay/pi_contract_123", status: "requires_merchant_authorization" };
+        },
+        async retrievePaymentIntent() { return { id: "pi_contract_123", status: "requires_recipient_consent" }; },
+        async merchantAuthorize(id) {
+          expect(id).toBe("pi_contract_123");
+          merchantAuthorized = true;
+          return { id, status: "requires_recipient_consent" };
+        },
+        async consent(id, input) {
+          expect(id).toBe("pi_contract_123");
+          expect(input).toEqual({ approved: true, confirm_destination: true });
+          return { id, status: "ready_for_execution" };
+        },
+        async confirmDestination(id) { return { id, status: "ready_for_execution" }; },
+        async execute(id) { return { id, status: "completed", outcome: "completed", credential_id: "cred_contract_123", credential_status: "active" }; },
+        async listEvents() { return []; },
+        async verifyCredential(id) {
+          expect(id).toBe("cred_contract_123");
+          return { verified: true, status: "active" };
+        },
+        async getCredentialStatus() { return { status: "active" }; },
+      },
+    });
+
+    const candidate = await login(created.app, "amara@careerbridge.test");
+    const application = await applyToDemoJob(created.app, candidate);
+    const timestamp = Date.now();
+    payDb.prepare("INSERT INTO passid_subject_bindings (subject_hash,candidate_user_id,status,created_at,updated_at) VALUES ('subject_hash_pay_flow','candidate_demo','bound',?,?)").run(timestamp, timestamp);
+    payDb.prepare("INSERT INTO passid_connections (id,application_id,candidate_user_id,passid_session_id,connection_id,status,granted_scopes,consent_status,created_at,updated_at) VALUES ('cbconn_pay_flow',?,'candidate_demo','pcs_pay_flow','conn_pay_flow','approved','[\"identity.read\",\"income.read\"]','active',?,?)")
+      .run(application.id, timestamp, timestamp);
+    payDb.prepare("INSERT INTO verification_results (id,application_id,candidate_user_id,result_json,updated_at) VALUES ('vr_pay_flow',?,'candidate_demo',?,?)")
+      .run(application.id, JSON.stringify({ identity: "verified", income: "verified" }), timestamp);
+
+    const employer = await login(created.app, "recruiter@careerbridge.test", "employer");
+    const intentResponse = await created.app.request("/api/passid/pay/intents", {
+      method: "POST",
+      headers: { Cookie: employer.cookie, "Content-Type": "application/json", "X-CSRF-Token": employer.csrf },
+      body: JSON.stringify({
+        application_id: application.id,
+        amount_minor: 120000,
+        currency: "USD",
+        purpose: "contractor_payout",
+        destination_id: "dst_contract_123",
+        policy_id: "pol_contractor_payout_v1",
+        idempotency_key: "payout-contract-123",
+      }),
+    });
+    expect(intentResponse.status).toBe(201);
+    const intent = await intentResponse.json() as any;
+    expect(merchantAuthorized).toBe(true);
+    expect(createInput).toMatchObject({
+      recipient: { connection_id: "conn_pay_flow", destination_id: "dst_contract_123" },
+      policy_id: "pol_contractor_payout_v1",
+    });
+
+    const consentResponse = await created.app.request(`/api/passid/pay/intents/${intent.id}/consent`, {
+      method: "POST",
+      headers: { Cookie: candidate.cookie, "Content-Type": "application/json", "X-CSRF-Token": candidate.csrf },
+      body: JSON.stringify({ approved: true, confirm_destination: true }),
+    });
+    expect(consentResponse.status).toBe(200);
+
+    const executeResponse = await created.app.request(`/api/passid/pay/intents/${intent.id}/execute`, {
+      method: "POST",
+      headers: { Cookie: employer.cookie, "X-CSRF-Token": employer.csrf },
+    });
+    expect(executeResponse.status).toBe(200);
+    expect(await executeResponse.json()).toMatchObject({
+      status: "simulated_completed",
+      credential_id: "cred_contract_123",
+      credential_verified: true,
+      credential_status: "active",
+    });
+    expect(payDb.prepare("SELECT destination_id,policy_id,credential_verified FROM pay_payment_intents WHERE id=?").get(intent.id))
+      .toMatchObject({ destination_id: "dst_contract_123", policy_id: "pol_contractor_payout_v1", credential_verified: 1 });
+  });
+
   it("runs the official PASSID public sandbox independently of application readiness", async () => {
     const anonymous = await app.request("/api/passid/pay/demo/intents", { method: "POST" });
     expect(anonymous.status).toBe(401);

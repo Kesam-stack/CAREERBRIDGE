@@ -610,7 +610,7 @@ export function createCareerBridgeApp(options: AppOptions = {}) {
 
     const product = {
       mode: env.PASSID_PAY_ENABLED && passidPay ? "live" : "unavailable",
-      // PassID Pay's own docs: execution is simulated_completed everywhere until licensed rails are approved.
+      // PASSID documents no fund movement for sandbox or current trust-layer-only live keys.
       transfers_enabled: false,
       public_api_available: env.PASSID_PAY_ENABLED,
     } as const;
@@ -755,12 +755,14 @@ export function createCareerBridgeApp(options: AppOptions = {}) {
       amount_minor: z.number().int().min(1).max(100000000),
       currency: z.literal("USD"),
       purpose: z.string().trim().min(3).max(160),
+      destination_id: z.string().trim().min(3).max(160).regex(/^[A-Za-z0-9._:-]+$/),
+      policy_id: z.string().trim().min(3).max(160).regex(/^[A-Za-z0-9._:-]+$/),
       idempotency_key: z.string().trim().min(8).max(100).regex(/^[A-Za-z0-9._:-]+$/),
     }).safeParse(await c.req.json().catch(() => null));
     if (!parsed.success) return c.json({ error: "invalid_payment_intent", fields: parsed.error.flatten().fieldErrors }, 400);
     const row = db.prepare(`
       SELECT a.id,a.candidate_user_id,j.organization_id,o.owner_user_id,a.status AS application_status,j.title,o.name AS organization_name,j.verification_requirements,
-        pc.status AS connection_status,pc.consent_status,pc.expires_at,vr.result_json,
+        pc.connection_id,pc.status AS connection_status,pc.consent_status,pc.expires_at,vr.result_json,
         CASE WHEN psb.candidate_user_id IS NULL THEN 0 ELSE 1 END AS identity_bound
       FROM applications a JOIN jobs j ON j.id=a.job_id JOIN organizations o ON o.id=j.organization_id
       LEFT JOIN passid_connections pc ON pc.id=(SELECT latest.id FROM passid_connections latest WHERE latest.application_id=a.id AND latest.candidate_user_id=a.candidate_user_id ORDER BY latest.updated_at DESC LIMIT 1)
@@ -770,16 +772,24 @@ export function createCareerBridgeApp(options: AppOptions = {}) {
     `).get(parsed.data.application_id) as any;
     if (!row || (user.role !== "admin" && row.owner_user_id !== user.id)) return c.json({ error: "application_not_found" }, 404);
     if (payReadinessFromRow(row).verification_state !== "verification_complete") return c.json({ error: "passid_verification_required" }, 409);
+    if (!row.connection_id) return c.json({ error: "passid_connection_required" }, 409);
     const replay = db.prepare("SELECT id,passid_intent_id,status,hosted_url FROM pay_payment_intents WHERE organization_id=? AND idempotency_key=?").get(row.organization_id, parsed.data.idempotency_key) as any;
     if (replay) return c.json({ ...replay, replayed: true });
     let created;
+    let authorized;
     try {
       created = await passidPay.createPaymentIntent({
         amount: parsed.data.amount_minor,
         currency: parsed.data.currency,
         purpose: parsed.data.purpose,
+        recipient: {
+          connection_id: row.connection_id,
+          destination_id: parsed.data.destination_id,
+        },
+        policy_id: parsed.data.policy_id,
         idempotency_key: parsed.data.idempotency_key,
       });
+      authorized = await passidPay.merchantAuthorize(created.id);
     } catch (error) {
       console.error("[passid pay intent create failed]", { requestId: (error as any)?.requestId, status: (error as any)?.status });
       return c.json({ error: "passid_pay_unavailable" }, 502);
@@ -787,14 +797,14 @@ export function createCareerBridgeApp(options: AppOptions = {}) {
     const localId = randomId("ppi");
     const timestamp = now();
     db.transaction(() => {
-      db.prepare(`INSERT INTO pay_payment_intents (id,passid_intent_id,organization_id,application_id,candidate_user_id,created_by_user_id,amount_minor,currency,purpose,status,hosted_url,idempotency_key,created_at,updated_at)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
-        .run(localId, created.id, row.organization_id, row.id, row.candidate_user_id, user.id, parsed.data.amount_minor, parsed.data.currency, parsed.data.purpose, "requires_consent", created.hosted_url ?? null, parsed.data.idempotency_key, timestamp, timestamp);
+      db.prepare(`INSERT INTO pay_payment_intents (id,passid_intent_id,organization_id,application_id,candidate_user_id,created_by_user_id,amount_minor,currency,purpose,destination_id,policy_id,status,hosted_url,idempotency_key,created_at,updated_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+        .run(localId, created.id, row.organization_id, row.id, row.candidate_user_id, user.id, parsed.data.amount_minor, parsed.data.currency, parsed.data.purpose, parsed.data.destination_id, parsed.data.policy_id, "requires_consent", authorized.hosted_url ?? created.hosted_url ?? null, parsed.data.idempotency_key, timestamp, timestamp);
       db.prepare("INSERT INTO pay_payment_events (id,payment_intent_id,type,actor_user_id,payload_summary,created_at) VALUES (?,?,?,?,?,?)")
-        .run(randomId("ppevt"), localId, "intent.created", user.id, JSON.stringify({ amount_minor: parsed.data.amount_minor, currency: "USD" }), timestamp);
-      audit(db, user.id, "pay.intent.create", "payment_intent", localId, { amount_minor: parsed.data.amount_minor, currency: "USD", passid_intent_id: created.id });
+        .run(randomId("ppevt"), localId, "intent.merchant_authorized", user.id, JSON.stringify({ amount_minor: parsed.data.amount_minor, currency: "USD", policy_id: parsed.data.policy_id }), timestamp);
+      audit(db, user.id, "pay.intent.merchant_authorize", "payment_intent", localId, { amount_minor: parsed.data.amount_minor, currency: "USD", passid_intent_id: created.id, policy_id: parsed.data.policy_id });
     })();
-    return c.json({ id: localId, passid_intent_id: created.id, status: "requires_consent", hosted_url: created.hosted_url ?? null }, 201);
+    return c.json({ id: localId, passid_intent_id: created.id, status: "requires_consent", hosted_url: authorized.hosted_url ?? created.hosted_url ?? null }, 201);
   });
 
   app.post("/api/passid/pay/intents/:id/consent", async (c) => {
@@ -862,16 +872,29 @@ export function createCareerBridgeApp(options: AppOptions = {}) {
       console.error("[passid pay execute failed]", { requestId: (error as any)?.requestId, status: (error as any)?.status });
       return c.json({ error: "passid_pay_execute_failed" }, 502);
     }
-    const status = result.status === "simulated_completed" ? "simulated_completed" : "failed";
+    const completed = result.outcome === "completed" || result.status === "completed" || result.status === "simulated_completed";
+    const status = completed ? "simulated_completed" : "failed";
+    let credentialVerified: boolean | null = null;
+    let credentialStatus = result.credential_status ?? null;
+    if (completed && result.credential_id) {
+      try {
+        const verification = await passidPay.verifyCredential(result.credential_id);
+        credentialVerified = verification.verified;
+        credentialStatus = verification.status ?? credentialStatus;
+      } catch (error) {
+        console.error("[passid pay credential verify failed]", { requestId: (error as any)?.requestId, status: (error as any)?.status });
+        credentialVerified = false;
+      }
+    }
     const timestamp = now();
     db.transaction(() => {
-      db.prepare("UPDATE pay_payment_intents SET status=?,credential_id=?,executed_at=?,updated_at=? WHERE id=?")
-        .run(status, result.credential_id ?? null, timestamp, timestamp, intent.id);
+      db.prepare("UPDATE pay_payment_intents SET status=?,credential_id=?,credential_verified=?,credential_status=?,executed_at=?,updated_at=? WHERE id=?")
+        .run(status, result.credential_id ?? null, credentialVerified == null ? null : Number(credentialVerified), credentialStatus, timestamp, timestamp, intent.id);
       db.prepare("INSERT INTO pay_payment_events (id,payment_intent_id,type,actor_user_id,payload_summary,created_at) VALUES (?,?,?,?,?,?)")
         .run(randomId("ppevt"), intent.id, "intent.executed", user.id, JSON.stringify({ status, credential_id: result.credential_id ?? null }), timestamp);
       audit(db, user.id, "pay.intent.execute", "payment_intent", intent.id, { status });
     })();
-    return c.json({ id: intent.id, status, credential_id: result.credential_id ?? null });
+    return c.json({ id: intent.id, status, credential_id: result.credential_id ?? null, credential_verified: credentialVerified, credential_status: credentialStatus });
   });
 
   app.get("/api/passid/pay/intents/:id/events", async (c) => {

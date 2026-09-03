@@ -72,4 +72,10 @@ describe("CareerBridge production environment validation", () => {
     expect(env.PASSID_API_BASE_URL).toBe(source.PASSID_CONNECT_BASE);
     expect(env.PASSID_SECRET_KEY).toBe(source.PASSID_CONNECT_KEY);
   });
+
+  it("keeps Pay environment independent from Connect and validates Pay key format", () => {
+    expect(getEnvironmentIssues({ ...complete, PASSID_PAY_SECRET_KEY: "pay_test_sandbox_can_run_beside_live_connect" })).toEqual([]);
+    expect(getEnvironmentIssues({ ...complete, PASSID_PAY_SECRET_KEY: "sk_live_not_a_pay_key" }))
+      .toContain("PASSID_PAY_SECRET_KEY: must be a pay_test_ or pay_live_ key");
+  });
 });

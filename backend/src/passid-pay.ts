@@ -1,13 +1,18 @@
 import type { CareerBridgeEnv } from "./env";
 import { redactError } from "./security";
 
-// PassID Pay (https://passid.io/integration-guide#guide-pay): one public /v1/pay API,
-// environment is selected by the key (pay_test_ vs pay_live_). Execution is always
-// simulated ("simulated_completed") until PassID approves licensed settlement rails.
+// PassID Pay (https://passid.io/integration-guide#guide-pay): one public /v1/pay API.
+// The pay_test_/pay_live_ key selects the environment. The API reports a completed
+// outcome, but currently uses simulation/trust-layer-only execution rather than settlement.
 export interface CreatePaymentIntentInput {
   amount: number;
   currency: "USD";
   purpose: string;
+  recipient: {
+    connection_id: string;
+    destination_id: string;
+  };
+  policy_id: string;
   idempotency_key: string;
 }
 
@@ -19,6 +24,8 @@ export interface PaymentIntent {
   currency?: string;
   purpose?: string;
   credential_id?: string;
+  credential_status?: string;
+  outcome?: string;
   request_id?: string;
 }
 
@@ -83,14 +90,17 @@ export function createPassidPayClient(env: CareerBridgeEnv): PassidPayClient {
   }
 
   function toIntent(body: any, requestId?: string): PaymentIntent {
+    const intent = body?.intent ?? body;
     return {
-      id: String(body?.id ?? ""),
-      hosted_url: body?.hosted_url ? String(body.hosted_url) : undefined,
-      status: body?.status ? String(body.status) : "unknown",
-      amount: typeof body?.amount === "number" ? body.amount : undefined,
-      currency: body?.currency ? String(body.currency) : undefined,
-      purpose: body?.purpose ? String(body.purpose) : undefined,
-      credential_id: body?.credential_id ? String(body.credential_id) : undefined,
+      id: String(intent?.id ?? ""),
+      hosted_url: intent?.hosted_url ? String(intent.hosted_url) : undefined,
+      status: String(intent?.state ?? intent?.status ?? body?.outcome ?? "unknown"),
+      amount: typeof intent?.amount === "number" ? intent.amount : undefined,
+      currency: intent?.currency ? String(intent.currency) : undefined,
+      purpose: intent?.purpose ? String(intent.purpose) : undefined,
+      credential_id: body?.credential_id ? String(body.credential_id) : intent?.credential_id ? String(intent.credential_id) : undefined,
+      credential_status: body?.credential_status ? String(body.credential_status) : intent?.credential_status ? String(intent.credential_status) : undefined,
+      outcome: body?.outcome ? String(body.outcome) : intent?.outcome ? String(intent.outcome) : undefined,
       request_id: requestId,
     };
   }
@@ -101,7 +111,13 @@ export function createPassidPayClient(env: CareerBridgeEnv): PassidPayClient {
         const { body, requestId } = await request("/payment-intents", {
           method: "POST",
           headers: { "Idempotency-Key": input.idempotency_key },
-          body: JSON.stringify({ amount: input.amount, currency: input.currency, purpose: input.purpose }),
+          body: JSON.stringify({
+            amount: input.amount,
+            currency: input.currency,
+            purpose: input.purpose,
+            recipient: input.recipient,
+            policy_id: input.policy_id,
+          }),
         });
         if (!body?.id) throw new Error("PASSID_PAY_INVALID_INTENT_RESPONSE");
         return toIntent(body, requestId);
@@ -149,7 +165,10 @@ export function createPassidPayClient(env: CareerBridgeEnv): PassidPayClient {
     },
     async verifyCredential(id) {
       const { body } = await request(`/credentials/${encodeURIComponent(id)}/verify`, { method: "POST" });
-      return { verified: body?.verified === true, status: body?.status ? String(body.status) : undefined };
+      return {
+        verified: body?.verified === true || body?.valid === true,
+        status: body?.credential_status ? String(body.credential_status) : body?.status ? String(body.status) : undefined,
+      };
     },
     async getCredentialStatus(id) {
       const { body } = await request(`/credentials/${encodeURIComponent(id)}/status`);

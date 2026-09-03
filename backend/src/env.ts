@@ -95,9 +95,8 @@ export function getEnvironmentIssues(source: Record<string, string | undefined> 
   }
   const payEnabled = (read(normalized, "PASSID_PAY_ENABLED") || read(normalized, "PASSID_PAY_PREVIEW_ENABLED")).toLowerCase() !== "false";
   const payKey = read(normalized, "PASSID_PAY_SECRET_KEY");
-  if (payEnabled && payKey) {
-    if (env === "live" && payKey.startsWith("pay_test_")) issues.push("PASSID_PAY_SECRET_KEY: sandbox pay keys cannot be used in live mode");
-    if (env === "sandbox" && payKey.startsWith("pay_live_")) issues.push("PASSID_PAY_SECRET_KEY: live pay keys cannot be used in sandbox mode");
+  if (payEnabled && payKey && !/^pay_(test|live)_.+/.test(payKey)) {
+    issues.push("PASSID_PAY_SECRET_KEY: must be a pay_test_ or pay_live_ key");
   }
   const apiBase = read(normalized, "PASSID_API_BASE_URL").replace(/\/+$/, "");
   if (env === "sandbox" && /\/v1\/connect$/.test(apiBase)) {

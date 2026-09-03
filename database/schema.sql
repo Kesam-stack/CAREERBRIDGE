@@ -1,4 +1,4 @@
 -- CareerBridge schema is created by backend/src/db.ts for SQLite.
 -- Tables: users, sessions, candidate_profiles, organizations, jobs, saved_jobs,
 -- applications, passid_sessions, passid_connections, passid_webhook_events,
--- verification_results, audit_logs.
+-- verification_results, pay_payment_intents, pay_payment_events, audit_logs.
