@@ -609,28 +609,39 @@ function PassidPay({ auth }: { auth: any }) {
     await refreshIntents();
   }
 
-  async function createDemoIntent(e: React.FormEvent<HTMLFormElement>) {
-    e.preventDefault();
+  async function launchDemoIntent(amount: number, scenario: string) {
     setDemoBusy("create");
     setDemoMessage("");
     setDemoIntent(null);
     setDemoResult(null);
-    const fd = new FormData(e.currentTarget);
     const response = await api("/api/passid/pay/demo/intents", {
       method: "POST",
       body: JSON.stringify({
-        amount: Math.round(Number(fd.get("amount")) * 100),
+        amount,
         currency: "USD",
         purpose: "contractor_payout",
-        scenario: String(fd.get("scenario") ?? "success"),
+        scenario,
       }),
     }, auth.csrf);
     const body = await response.json();
     if (response.ok) {
       setDemoIntent(body.intent);
-      setDemoMessage("Official PASSID sandbox intent created. Recipient consent is now required.");
+      if (body.intent?.hosted_url) {
+        window.location.assign(body.intent.hosted_url);
+        return;
+      }
+      setDemoMessage("Official PASSID sandbox intent created, but no hosted authorization URL was returned.");
     } else setDemoMessage(body.message ?? "The PASSID public sandbox could not create this intent.");
     setDemoBusy("");
+  }
+
+  async function createDemoIntent(e: React.FormEvent<HTMLFormElement>) {
+    e.preventDefault();
+    const fd = new FormData(e.currentTarget);
+    await launchDemoIntent(
+      Math.round(Number(fd.get("amount")) * 100),
+      String(fd.get("scenario") ?? "success"),
+    );
   }
 
   async function consentDemo(approved: boolean) {
@@ -681,7 +692,7 @@ function PassidPay({ auth }: { auth: any }) {
         <p>{isEmployer ? "Prepare verified candidates for payout authorization built around explicit permission, institution controls, and an audit-ready trail." : "Move from verified hiring to payout onboarding with one identity candidates control and one consent trail institutions can trust."}</p>
         <div className="hero-actions">
           {auth.user
-            ? <a className="button" href="#passid-pay-sandbox">Run sandbox payout <ChevronRight size={17} /></a>
+            ? <button className="button" type="button" disabled={Boolean(demoBusy)} onClick={() => launchDemoIntent(120000, "success")}>{demoBusy === "create" ? "Opening PASSID…" : "Open PASSID Pay UI"} <ChevronRight size={17} /></button>
             : <Link className="button" to="/login">Sign in to run sandbox <ChevronRight size={17} /></Link>}
           {auth.user ? <Link className="button secondary" to={isEmployer ? "/applications" : "/settings"}>{isEmployer ? "Review applicants" : "Manage PASSID access"}</Link> : <Link className="button secondary" to="/login">Sign in</Link>}
         </div>
@@ -715,7 +726,7 @@ function PassidPay({ auth }: { auth: any }) {
           <option value="payment_failed">Payment failed</option>
           <option value="payment_returned">Payment returned</option>
         </select></label>
-        <button className="button" type="submit" disabled={Boolean(demoBusy)}>{demoBusy === "create" ? "Creating…" : "Create sandbox intent"}</button>
+        <button className="button" type="submit" disabled={Boolean(demoBusy)}>{demoBusy === "create" ? "Opening PASSID…" : "Open PASSID hosted UI"}</button>
       </form>
       {demoMessage && <div className="notice" role="status">{demoMessage}</div>}
       {demoIntent && <div className="pay-sandbox-result">

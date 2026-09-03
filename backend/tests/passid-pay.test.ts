@@ -21,7 +21,7 @@ describe("PASSID Pay HTTP client contract", () => {
       if (String(input).endsWith("/merchant-authorize")) {
         return Response.json({ data: { id: "pi_123", state: "requires_recipient_consent" } });
       }
-      return Response.json({ data: { id: "pi_123", state: "requires_merchant_authorization", hosted_url: "https://app.passid.io/pay/pi_123" } });
+      return Response.json({ data: { id: "pi_123", state: "requires_merchant_authorization", hosted_url: "/pay/authorize/pi_123" } });
     }) as typeof fetch;
 
     const client = createPassidPayClient(env);

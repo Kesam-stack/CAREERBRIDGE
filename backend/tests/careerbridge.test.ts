@@ -569,7 +569,7 @@ describe("CareerBridge independent PASSID institution app", () => {
       if (url.endsWith("/execute")) return Response.json({ success: true, environment: "sandbox", data: { intent: { id, state: "simulated_completed", status: "simulated_completed" }, receipt_id: "rcpt_sbx_test", credential_id: "cred_sbx_test", outcome: "simulated_completed" } });
       if (url.endsWith("/consent")) return Response.json({ success: true, environment: "sandbox", data: { id, state: "ready_for_execution", amount: 120000, currency: "USD" } });
       expect(JSON.parse(String(init?.body))).toMatchObject({ amount: 120000, currency: "USD", purpose: "contractor_payout", scenario: "success" });
-      return Response.json({ success: true, environment: "sandbox", data: { id, state: "requires_recipient_consent", amount: 120000, currency: "USD" } });
+      return Response.json({ success: true, environment: "sandbox", data: { id, state: "requires_recipient_consent", amount: 120000, currency: "USD", hosted_url: `/pay/authorize/${id}` } });
     }) as typeof fetch;
 
     try {
@@ -581,6 +581,7 @@ describe("CareerBridge independent PASSID institution app", () => {
       expect(created.status).toBe(201);
       const createdBody = await created.json() as any;
       expect(createdBody.intent.state).toBe("requires_recipient_consent");
+      expect(createdBody.intent.hosted_url).toBe("https://passid.io/pay/authorize/pi_sbx_careerbridge123");
 
       const consented = await app.request(`/api/passid/pay/demo/intents/${createdBody.intent.id}/consent`, {
         method: "POST",

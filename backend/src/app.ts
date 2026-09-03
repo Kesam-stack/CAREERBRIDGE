@@ -65,12 +65,14 @@ function clientAddress(c: any): string {
   return forwarded || "unknown-client";
 }
 
-function isSafePassidHostedUrl(value: string): boolean {
+function normalizePassidHostedUrl(value: string): string | null {
   try {
-    const url = new URL(value);
-    return url.protocol === "https:" && (url.hostname === "passid.io" || url.hostname.endsWith(".passid.io"));
+    const url = new URL(value, "https://passid.io");
+    return url.protocol === "https:" && (url.hostname === "passid.io" || url.hostname.endsWith(".passid.io"))
+      ? url.toString()
+      : null;
   } catch {
-    return false;
+    return null;
   }
 }
 
@@ -707,8 +709,10 @@ export function createCareerBridgeApp(options: AppOptions = {}) {
     if (!limit.allowed) return c.json({ error: "passid_pay_demo_rate_limited", retry_after_seconds: limit.retryAfterSeconds }, 429);
     const result = await callPassidPayPublicDemo("/payment-intents", parsed.data);
     if (!result.ok) return c.json({ error: "passid_pay_demo_unavailable", message: result.error }, 502);
+    const hostedUrl = result.data?.hosted_url ? normalizePassidHostedUrl(String(result.data.hosted_url)) : null;
+    if (result.data?.hosted_url && !hostedUrl) return c.json({ error: "passid_pay_demo_unavailable", message: "PASSID returned an invalid hosted URL" }, 502);
     audit(db, user.id, "pay.demo.intent.create", "passid_demo_intent", result.data.id, { scenario: parsed.data.scenario, amount: parsed.data.amount });
-    return c.json({ environment: result.environment, intent: result.data }, 201);
+    return c.json({ environment: result.environment, intent: { ...result.data, hosted_url: hostedUrl } }, 201);
   });
 
   app.post("/api/passid/pay/demo/intents/:id/consent", async (c) => {
@@ -816,8 +820,8 @@ export function createCareerBridgeApp(options: AppOptions = {}) {
         idempotency_key: parsed.data.idempotency_key,
       });
       authorized = await passidPay.merchantAuthorize(created.id);
-      hostedUrl = authorized.hosted_url ?? created.hosted_url ?? "";
-      if (!isSafePassidHostedUrl(hostedUrl)) throw new Error("PASSID_PAY_UNSAFE_HOSTED_URL");
+      hostedUrl = normalizePassidHostedUrl(authorized.hosted_url ?? created.hosted_url ?? "") ?? "";
+      if (!hostedUrl) throw new Error("PASSID_PAY_UNSAFE_HOSTED_URL");
     } catch (error) {
       console.error("[passid pay intent create failed]", { requestId: (error as any)?.requestId, status: (error as any)?.status });
       return c.json({ error: "passid_pay_unavailable" }, 502);
@@ -848,12 +852,13 @@ export function createCareerBridgeApp(options: AppOptions = {}) {
     try {
       const result = await passidPay.retrievePaymentIntent(intent.passid_intent_id);
       const status = localPayStatus(result.status, intent.status);
-      if (result.hosted_url && !isSafePassidHostedUrl(result.hosted_url)) throw new Error("PASSID_PAY_UNSAFE_HOSTED_URL");
+      const refreshedHostedUrl = result.hosted_url ? normalizePassidHostedUrl(result.hosted_url) : null;
+      if (result.hosted_url && !refreshedHostedUrl) throw new Error("PASSID_PAY_UNSAFE_HOSTED_URL");
       const timestamp = now();
       db.prepare("UPDATE pay_payment_intents SET status=?,hosted_url=COALESCE(?,hosted_url),consented_at=CASE WHEN ?='ready_to_execute' AND consented_at IS NULL THEN ? ELSE consented_at END,updated_at=? WHERE id=?")
-        .run(status, result.hosted_url ?? null, status, timestamp, timestamp, intent.id);
+        .run(status, refreshedHostedUrl, status, timestamp, timestamp, intent.id);
       audit(db, user.id, "pay.intent.refresh", "payment_intent", intent.id, { status, passid_status: result.status });
-      return c.json({ id: intent.id, status, passid_status: result.status, hosted_url: result.hosted_url ?? null });
+      return c.json({ id: intent.id, status, passid_status: result.status, hosted_url: refreshedHostedUrl });
     } catch (error) {
       console.error("[passid pay intent refresh failed]", { requestId: (error as any)?.requestId, status: (error as any)?.status });
       return c.json({ error: "passid_pay_unavailable" }, 502);
@@ -1004,16 +1009,17 @@ export function createCareerBridgeApp(options: AppOptions = {}) {
         code_challenge_method: "S256",
         access_duration: "90days",
       });
-      if (!isSafePassidHostedUrl(created.hosted_url) || /client_secret|secret=/i.test(created.hosted_url)) {
+      const connectHostedUrl = normalizePassidHostedUrl(created.hosted_url);
+      if (!connectHostedUrl || /client_secret|secret=/i.test(connectHostedUrl)) {
         throw new Error("PASSID_UNSAFE_HOSTED_URL");
       }
       const upstreamExpiry = created.expires_at ? Date.parse(created.expires_at) : NaN;
       const effectiveExpiry = Number.isFinite(upstreamExpiry) ? Math.min(expiresAt, upstreamExpiry) : expiresAt;
       db.prepare("UPDATE passid_sessions SET passid_session_id=?, hosted_url=?, status=?, expires_at=? WHERE id=?")
-        .run(created.session_id, created.hosted_url, created.status, effectiveExpiry, sessionRecordId);
+        .run(created.session_id, connectHostedUrl, created.status, effectiveExpiry, sessionRecordId);
       audit(db, user.id, "passid.session.create", "application", appRow.id, { scopes, environment: env.PASSID_ENVIRONMENT });
       return c.json({
-        hosted_url: created.hosted_url,
+        hosted_url: connectHostedUrl,
         session_id: created.session_id,
         expires_at: new Date(effectiveExpiry).toISOString(),
         requested_scopes: scopes,
