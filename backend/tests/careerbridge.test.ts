@@ -462,7 +462,7 @@ describe("CareerBridge independent PASSID institution app", () => {
     expect(JSON.stringify(employerBody)).not.toContain("subject_hash_pay");
   });
 
-  it("creates, authorizes, consents, executes, and verifies a PASSID Pay intent", async () => {
+  it("creates and authorizes an intent, refreshes hosted consent, executes, and verifies it", async () => {
     const payDb = new Database(":memory:");
     migrate(payDb);
     seed(payDb);
@@ -477,17 +477,13 @@ describe("CareerBridge independent PASSID institution app", () => {
           createInput = input;
           return { id: "pi_contract_123", hosted_url: "https://app.passid.io/pay/pi_contract_123", status: "requires_merchant_authorization" };
         },
-        async retrievePaymentIntent() { return { id: "pi_contract_123", status: "requires_recipient_consent" }; },
+        async retrievePaymentIntent() { return { id: "pi_contract_123", status: "ready_for_execution" }; },
         async merchantAuthorize(id) {
           expect(id).toBe("pi_contract_123");
           merchantAuthorized = true;
           return { id, status: "requires_recipient_consent" };
         },
-        async consent(id, input) {
-          expect(id).toBe("pi_contract_123");
-          expect(input).toEqual({ approved: true, confirm_destination: true });
-          return { id, status: "ready_for_execution" };
-        },
+        async consent(id) { return { id, status: "ready_for_execution" }; },
         async confirmDestination(id) { return { id, status: "ready_for_execution" }; },
         async execute(id) { return { id, status: "completed", outcome: "completed", credential_id: "cred_contract_123", credential_status: "active" }; },
         async listEvents() { return []; },
@@ -530,12 +526,19 @@ describe("CareerBridge independent PASSID institution app", () => {
       policy_id: "pol_contractor_payout_v1",
     });
 
-    const consentResponse = await created.app.request(`/api/passid/pay/intents/${intent.id}/consent`, {
+    const refreshResponse = await created.app.request(`/api/passid/pay/intents/${intent.id}/refresh`, {
+      method: "POST",
+      headers: { Cookie: candidate.cookie, "X-CSRF-Token": candidate.csrf },
+    });
+    expect(refreshResponse.status).toBe(200);
+    expect(await refreshResponse.json()).toMatchObject({ status: "ready_to_execute", passid_status: "ready_for_execution" });
+
+    const localConsentResponse = await created.app.request(`/api/passid/pay/intents/${intent.id}/consent`, {
       method: "POST",
       headers: { Cookie: candidate.cookie, "Content-Type": "application/json", "X-CSRF-Token": candidate.csrf },
       body: JSON.stringify({ approved: true, confirm_destination: true }),
     });
-    expect(consentResponse.status).toBe(200);
+    expect(localConsentResponse.status).toBe(404);
 
     const executeResponse = await created.app.request(`/api/passid/pay/intents/${intent.id}/execute`, {
       method: "POST",

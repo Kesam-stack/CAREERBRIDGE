@@ -589,12 +589,12 @@ function PassidPay({ auth }: { auth: any }) {
     if (res.ok) { e.currentTarget.reset(); await refreshIntents(); }
   }
 
-  async function consent(id: string, approved: boolean) {
+  async function refreshIntent(id: string) {
     setBusyId(id);
     setIntentsMessage("");
-    const res = await api(`/api/passid/pay/intents/${id}/consent`, { method: "POST", body: JSON.stringify({ approved, confirm_destination: approved }) }, auth.csrf);
+    const res = await api(`/api/passid/pay/intents/${id}/refresh`, { method: "POST" }, auth.csrf);
     const body = await res.json();
-    setIntentsMessage(res.ok ? `Consent recorded (${body.status}).` : body.error ?? "Unable to record consent.");
+    setIntentsMessage(res.ok ? `PASSID status refreshed (${body.status}).` : body.error ?? "Unable to refresh this payment intent.");
     setBusyId("");
     await refreshIntents();
   }
@@ -776,11 +776,11 @@ function PassidPay({ auth }: { auth: any }) {
         <span>${((intent.amount_minor ?? 0) / 100).toFixed(2)} · {intent.purpose}</span>
         <strong>{intent.status}</strong>
         {auth.user?.role === "candidate" && intent.status === "requires_consent" && <span className="hero-actions">
-          <button className="button" type="button" disabled={busyId === intent.id} onClick={() => consent(intent.id, true)}>Approve</button>
-          <button className="button secondary" type="button" disabled={busyId === intent.id} onClick={() => consent(intent.id, false)}>Decline</button>
+          {intent.hosted_url && <a className="button" href={intent.hosted_url} target="_blank" rel="noreferrer">Review in PASSID <ExternalLink size={15} /></a>}
+          <button className="button secondary" type="button" disabled={busyId === intent.id} onClick={() => refreshIntent(intent.id)}>{busyId === intent.id ? "Checking…" : "Check PASSID status"}</button>
         </span>}
         {isEmployer && intent.status === "ready_to_execute" && <button className="button" type="button" disabled={busyId === intent.id} onClick={() => execute(intent.id)}>Execute</button>}
-        {intent.hosted_url && <a className="button secondary" href={intent.hosted_url} target="_blank" rel="noreferrer">Open hosted consent <ExternalLink size={15} /></a>}
+        {auth.user?.role === "candidate" && intent.status !== "requires_consent" && intent.hosted_url && <a className="button secondary" href={intent.hosted_url} target="_blank" rel="noreferrer">Open PASSID <ExternalLink size={15} /></a>}
       </div>)}</div> : <p>No payment intents yet.{isEmployer ? "" : " An institution creates a payment intent once your application has completed PASSID verification."}</p>}
     </div>}
 

@@ -54,8 +54,7 @@ careerbridge/
 - `GET /api/admin/passid`
 - `GET /api/passid/pay/readiness`
 - `GET|POST /api/passid/pay/intents`
-- `POST /api/passid/pay/intents/:id/consent`
-- `POST /api/passid/pay/intents/:id/confirm-destination`
+- `POST /api/passid/pay/intents/:id/refresh`
 - `POST /api/passid/pay/intents/:id/execute`
 - `GET /api/passid/pay/intents/:id/events`
 
@@ -108,7 +107,7 @@ The login screen provides a direct password-change form for the three seeded Car
 
 For approved live access, set `PASSID_CONNECT_BASE=https://api.passid.io/v1/connect`. `PASSID_ENVIRONMENT=live` rejects `sk_test_` keys, and sandbox mode rejects live keys or the production Connect URL. The older `PASSID_API_BASE_URL` and `PASSID_SECRET_KEY` names remain supported during migration.
 
-PASSID Pay (https://passid.io/integration-guide#guide-pay) is a separate product and key from Connect. Mint a `pay_test_…` or `pay_live_…` key in the PassID dashboard under PassID Pay and set it as `PASSID_PAY_SECRET_KEY`; both key types call the same public `https://api.passid.io/v1/pay` base URL, with the environment selected by the key itself. Creating an intent requires the recipient's active Connect `connection_id`, a verified `destination_id`, and a `policy_id`. CareerBridge obtains the connection ID server-side, sends the destination and policy, performs merchant authorization, then allows recipient consent and execution. PASSID reports the payment outcome as `completed`, but neither sandbox nor current trust-layer-only live mode represents real settlement; CareerBridge stores that as `simulated_completed` to prevent ambiguity. Set `PASSID_PAY_ENABLED=false` to disable the feature entirely; without a configured `PASSID_PAY_SECRET_KEY`, CareerBridge's Pay routes respond with `pay_not_configured`.
+PASSID Pay (https://passid.io/integration-guide#guide-pay) is a separate product and key from Connect. Mint a `pay_test_…` or `pay_live_…` key in the PassID dashboard under PassID Pay and set it as `PASSID_PAY_SECRET_KEY`; both key types call the same public `https://api.passid.io/v1/pay` base URL, with the environment selected by the key itself. Creating an intent requires the recipient's active Connect `connection_id`, a verified `destination_id`, and a `policy_id`. CareerBridge obtains the connection ID server-side, sends the destination and policy, and performs merchant authorization. The recipient follows PASSID's returned `hosted_url`; PASSID's own UI handles disclosure consent and destination confirmation. CareerBridge then refreshes the authoritative intent state before allowing execution. PASSID reports the payment outcome as `completed`, but neither sandbox nor current trust-layer-only live mode represents real settlement; CareerBridge stores that as `simulated_completed` to prevent ambiguity. Set `PASSID_PAY_ENABLED=false` to disable the feature entirely; without a configured `PASSID_PAY_SECRET_KEY`, CareerBridge's Pay routes respond with `pay_not_configured`.
 
 PASSID derives your registered institution from `PASSID_CONNECT_KEY`; do not send or hard-code an institution ID. Public CareerBridge signup creates candidate or pending employer accounts only. Institution workspace access remains in PASSID's institution portal.
 

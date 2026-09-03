@@ -138,6 +138,31 @@ function payReadinessFromRow(row: any) {
   };
 }
 
+function localPayStatus(upstreamStatus: string, currentStatus: string): string {
+  switch (upstreamStatus) {
+    case "requires_recipient_consent":
+    case "requires_consent":
+    case "merchant_authorized":
+      return "requires_consent";
+    case "ready_for_execution":
+    case "ready_to_execute":
+      return "ready_to_execute";
+    case "recipient_declined":
+    case "consent_declined":
+    case "declined":
+      return "consent_declined";
+    case "completed":
+    case "simulated_completed":
+      return "simulated_completed";
+    case "failed":
+    case "payment_failed":
+    case "payment_returned":
+      return "failed";
+    default:
+      return currentStatus;
+  }
+}
+
 function contentType(path: string): string {
   switch (extname(path)) {
     case ".html": return "text/html; charset=utf-8";
@@ -777,6 +802,7 @@ export function createCareerBridgeApp(options: AppOptions = {}) {
     if (replay) return c.json({ ...replay, replayed: true });
     let created;
     let authorized;
+    let hostedUrl: string;
     try {
       created = await passidPay.createPaymentIntent({
         amount: parsed.data.amount_minor,
@@ -790,6 +816,8 @@ export function createCareerBridgeApp(options: AppOptions = {}) {
         idempotency_key: parsed.data.idempotency_key,
       });
       authorized = await passidPay.merchantAuthorize(created.id);
+      hostedUrl = authorized.hosted_url ?? created.hosted_url ?? "";
+      if (!isSafePassidHostedUrl(hostedUrl)) throw new Error("PASSID_PAY_UNSAFE_HOSTED_URL");
     } catch (error) {
       console.error("[passid pay intent create failed]", { requestId: (error as any)?.requestId, status: (error as any)?.status });
       return c.json({ error: "passid_pay_unavailable" }, 502);
@@ -799,57 +827,35 @@ export function createCareerBridgeApp(options: AppOptions = {}) {
     db.transaction(() => {
       db.prepare(`INSERT INTO pay_payment_intents (id,passid_intent_id,organization_id,application_id,candidate_user_id,created_by_user_id,amount_minor,currency,purpose,destination_id,policy_id,status,hosted_url,idempotency_key,created_at,updated_at)
         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`)
-        .run(localId, created.id, row.organization_id, row.id, row.candidate_user_id, user.id, parsed.data.amount_minor, parsed.data.currency, parsed.data.purpose, parsed.data.destination_id, parsed.data.policy_id, "requires_consent", authorized.hosted_url ?? created.hosted_url ?? null, parsed.data.idempotency_key, timestamp, timestamp);
+        .run(localId, created.id, row.organization_id, row.id, row.candidate_user_id, user.id, parsed.data.amount_minor, parsed.data.currency, parsed.data.purpose, parsed.data.destination_id, parsed.data.policy_id, "requires_consent", hostedUrl, parsed.data.idempotency_key, timestamp, timestamp);
       db.prepare("INSERT INTO pay_payment_events (id,payment_intent_id,type,actor_user_id,payload_summary,created_at) VALUES (?,?,?,?,?,?)")
         .run(randomId("ppevt"), localId, "intent.merchant_authorized", user.id, JSON.stringify({ amount_minor: parsed.data.amount_minor, currency: "USD", policy_id: parsed.data.policy_id }), timestamp);
       audit(db, user.id, "pay.intent.merchant_authorize", "payment_intent", localId, { amount_minor: parsed.data.amount_minor, currency: "USD", passid_intent_id: created.id, policy_id: parsed.data.policy_id });
     })();
-    return c.json({ id: localId, passid_intent_id: created.id, status: "requires_consent", hosted_url: authorized.hosted_url ?? created.hosted_url ?? null }, 201);
+    return c.json({ id: localId, passid_intent_id: created.id, status: "requires_consent", hosted_url: hostedUrl }, 201);
   });
 
-  app.post("/api/passid/pay/intents/:id/consent", async (c) => {
-    const user = await requireUser(c, ["candidate"]);
+  app.post("/api/passid/pay/intents/:id/refresh", async (c) => {
+    const user = await requireUser(c, ["candidate", "employer", "admin"]);
     if (user instanceof Response) return user;
     const csrf = await requireCsrf(c);
     if (csrf) return csrf;
     if (!env.PASSID_PAY_ENABLED || !passidPay) return c.json({ error: "pay_not_configured" }, 404);
-    const parsed = z.object({ approved: z.boolean(), confirm_destination: z.boolean() }).safeParse(await c.req.json().catch(() => null));
-    if (!parsed.success) return c.json({ error: "invalid_pay_consent" }, 400);
-    const intent = db.prepare("SELECT id,passid_intent_id,status FROM pay_payment_intents WHERE id=? AND candidate_user_id=?").get(c.req.param("id"), user.id) as any;
-    if (!intent) return c.json({ error: "payment_intent_not_found" }, 404);
-    if (intent.status !== "requires_consent") return c.json({ error: "payment_intent_not_awaiting_consent", status: intent.status }, 409);
-    let result;
+    const intent = db.prepare(`SELECT ppi.id,ppi.passid_intent_id,ppi.status,ppi.candidate_user_id,o.owner_user_id
+      FROM pay_payment_intents ppi JOIN organizations o ON o.id=ppi.organization_id WHERE ppi.id=?`).get(c.req.param("id")) as any;
+    const allowed = intent && (user.role === "admin" || intent.owner_user_id === user.id || intent.candidate_user_id === user.id);
+    if (!allowed) return c.json({ error: "payment_intent_not_found" }, 404);
     try {
-      result = await passidPay.consent(intent.passid_intent_id, { approved: parsed.data.approved, confirm_destination: parsed.data.confirm_destination });
+      const result = await passidPay.retrievePaymentIntent(intent.passid_intent_id);
+      const status = localPayStatus(result.status, intent.status);
+      if (result.hosted_url && !isSafePassidHostedUrl(result.hosted_url)) throw new Error("PASSID_PAY_UNSAFE_HOSTED_URL");
+      const timestamp = now();
+      db.prepare("UPDATE pay_payment_intents SET status=?,hosted_url=COALESCE(?,hosted_url),consented_at=CASE WHEN ?='ready_to_execute' AND consented_at IS NULL THEN ? ELSE consented_at END,updated_at=? WHERE id=?")
+        .run(status, result.hosted_url ?? null, status, timestamp, timestamp, intent.id);
+      audit(db, user.id, "pay.intent.refresh", "payment_intent", intent.id, { status, passid_status: result.status });
+      return c.json({ id: intent.id, status, passid_status: result.status, hosted_url: result.hosted_url ?? null });
     } catch (error) {
-      console.error("[passid pay consent failed]", { requestId: (error as any)?.requestId, status: (error as any)?.status });
-      return c.json({ error: "passid_pay_unavailable" }, 502);
-    }
-    const status = parsed.data.approved ? "ready_to_execute" : "consent_declined";
-    const timestamp = now();
-    db.transaction(() => {
-      db.prepare("UPDATE pay_payment_intents SET status=?,consented_at=?,updated_at=? WHERE id=?").run(status, timestamp, timestamp, intent.id);
-      db.prepare("INSERT INTO pay_payment_events (id,payment_intent_id,type,actor_user_id,payload_summary,created_at) VALUES (?,?,?,?,?,?)")
-        .run(randomId("ppevt"), intent.id, `intent.${status}`, user.id, JSON.stringify({ approved: parsed.data.approved }), timestamp);
-      audit(db, user.id, `pay.intent.${status}`, "payment_intent", intent.id, { approved: parsed.data.approved });
-    })();
-    return c.json({ id: intent.id, status, passid_status: result.status });
-  });
-
-  app.post("/api/passid/pay/intents/:id/confirm-destination", async (c) => {
-    const user = await requireUser(c, ["candidate"]);
-    if (user instanceof Response) return user;
-    const csrf = await requireCsrf(c);
-    if (csrf) return csrf;
-    if (!env.PASSID_PAY_ENABLED || !passidPay) return c.json({ error: "pay_not_configured" }, 404);
-    const intent = db.prepare("SELECT id,passid_intent_id FROM pay_payment_intents WHERE id=? AND candidate_user_id=?").get(c.req.param("id"), user.id) as any;
-    if (!intent) return c.json({ error: "payment_intent_not_found" }, 404);
-    try {
-      const result = await passidPay.confirmDestination(intent.passid_intent_id);
-      audit(db, user.id, "pay.intent.confirm_destination", "payment_intent", intent.id, {});
-      return c.json({ id: intent.id, passid_status: result.status });
-    } catch (error) {
-      console.error("[passid pay confirm destination failed]", { requestId: (error as any)?.requestId, status: (error as any)?.status });
+      console.error("[passid pay intent refresh failed]", { requestId: (error as any)?.requestId, status: (error as any)?.status });
       return c.json({ error: "passid_pay_unavailable" }, 502);
     }
   });
