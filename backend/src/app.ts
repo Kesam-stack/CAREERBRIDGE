@@ -1358,6 +1358,32 @@ export function createCareerBridgeApp(options: AppOptions = {}) {
     });
   });
 
+  app.post("/api/admin/passid/connections/:id/request-reverification", async (c) => {
+    const user = await requireUser(c, ["admin"]);
+    if (user instanceof Response) return user;
+    const csrf = await requireCsrf(c);
+    if (csrf) return csrf;
+    const row = db.prepare("SELECT * FROM passid_connections WHERE id=?").get(c.req.param("id")) as any;
+    if (!row) return c.json({ error: "not_found" }, 404);
+    if (row.consent_status === "revoked") return c.json({ ok: true, status: "revoked", already_revoked: true });
+    let reason: string | undefined;
+    try {
+      const body = await c.req.json();
+      reason = typeof body?.reason === "string" ? body.reason.slice(0, 500) : undefined;
+    } catch {}
+    try {
+      if (row.connection_id) await passid.revokeConnection(row.connection_id);
+    } catch {
+      return c.json({ error: "passid_revoke_failed" }, 502);
+    }
+    db.prepare("UPDATE passid_connections SET status='revoked', consent_status='revoked', updated_at=? WHERE id=?").run(now(), row.id);
+    db.prepare("UPDATE verification_results SET result_json=?, updated_at=? WHERE application_id=?")
+      .run(JSON.stringify({ status: "revoked", consent_status: "revoked", reason: "admin_requested_reverification", updated_at: new Date().toISOString() }), now(), row.application_id);
+    db.prepare("UPDATE applications SET status='verification_required', updated_at=? WHERE id=?").run(now(), row.application_id);
+    audit(db, user.id, "passid.connection.admin_reverification_request", "passid_connection", row.id, reason ? { reason } : {});
+    return c.json({ ok: true, status: "revoked" });
+  });
+
   app.get("/api/admin/passid/readiness", async (c) => {
     const user = await requireUser(c, ["admin"]);
     if (user instanceof Response) return user;

@@ -992,6 +992,54 @@ describe("CareerBridge independent PASSID institution app", () => {
     expect((await repeated.json() as any).already_revoked).toBe(true);
   });
 
+  it("lets an admin request re-verification, forcing the candidate to reconnect PASSID", async () => {
+    const auth = await login(app, "amara@careerbridge.test");
+    const application = await applyToDemoJob(app, auth);
+    db.prepare("INSERT INTO passid_connections (id,application_id,candidate_user_id,passid_session_id,connection_id,status,granted_scopes,consent_status,created_at,updated_at) VALUES ('cbconn_admin',?,?, 'pcs_2','conn_sandbox_test_123','approved','[\"identity.read\"]','active',?,?)")
+      .run(application.id, auth.user.id, Date.now(), Date.now());
+
+    const anonymous = await app.request("/api/admin/passid/connections/cbconn_admin/request-reverification", { method: "POST" });
+    expect(anonymous.status).toBe(401);
+
+    const asCandidate = await app.request("/api/admin/passid/connections/cbconn_admin/request-reverification", {
+      method: "POST", headers: { Cookie: auth.cookie, "X-CSRF-Token": auth.csrf },
+    });
+    expect(asCandidate.status).toBe(403);
+
+    const admin = await login(app, "admin@careerbridge.test", "admin");
+    const blocked = await app.request("/api/admin/passid/connections/cbconn_admin/request-reverification", {
+      method: "POST", headers: { Cookie: admin.cookie },
+    });
+    expect(blocked.status).toBe(403);
+
+    const missing = await app.request("/api/admin/passid/connections/does_not_exist/request-reverification", {
+      method: "POST", headers: { Cookie: admin.cookie, "X-CSRF-Token": admin.csrf },
+    });
+    expect(missing.status).toBe(404);
+
+    const ok = await app.request("/api/admin/passid/connections/cbconn_admin/request-reverification", {
+      method: "POST",
+      headers: { Cookie: admin.cookie, "X-CSRF-Token": admin.csrf, "Content-Type": "application/json" },
+      body: JSON.stringify({ reason: "Evidence expired, requesting fresh verification." }),
+    });
+    expect(ok.status).toBe(200);
+    expect((await ok.json() as any).status).toBe("revoked");
+
+    const connection = db.prepare("SELECT status, consent_status FROM passid_connections WHERE id='cbconn_admin'").get() as any;
+    expect(connection.consent_status).toBe("revoked");
+    const applicationAfter = db.prepare("SELECT status FROM applications WHERE id=?").get(application.id) as any;
+    expect(applicationAfter.status).toBe("verification_required");
+    const auditEntry = db.prepare("SELECT actor_user_id, detail_json FROM audit_logs WHERE action='passid.connection.admin_reverification_request'").get() as any;
+    expect(auditEntry.actor_user_id).toBe(admin.user.id);
+    expect(JSON.parse(auditEntry.detail_json).reason).toBe("Evidence expired, requesting fresh verification.");
+
+    const repeated = await app.request("/api/admin/passid/connections/cbconn_admin/request-reverification", {
+      method: "POST", headers: { Cookie: admin.cookie, "X-CSRF-Token": admin.csrf },
+    });
+    expect(repeated.status).toBe(200);
+    expect((await repeated.json() as any).already_revoked).toBe(true);
+  });
+
   it("creates a new account and signs the user in immediately", async () => {
     const res = await app.request("/api/auth/signup", {
       method: "POST",

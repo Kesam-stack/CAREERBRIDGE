@@ -872,16 +872,31 @@ function ApplicantDetail({ auth }: { auth: any }) {
 
 function AdminPassid({ auth }: { auth: any }) {
   const [data, setData] = useState<any>(null);
-  useEffect(() => {
+  const [message, setMessage] = useState("");
+  async function refresh() {
     if (auth.user?.role !== "admin") return;
-    api("/api/admin/passid").then((r) => r.json()).then(setData);
-  }, [auth.user?.role]);
+    const res = await api("/api/admin/passid");
+    setData(await res.json());
+  }
+  useEffect(() => { refresh(); }, [auth.user?.role]);
+  async function requestReverification(id: string) {
+    const res = await api(`/api/admin/passid/connections/${id}/request-reverification`, { method: "POST" }, auth.csrf);
+    const body = await res.json();
+    setMessage(res.ok
+      ? (body.already_revoked ? "Re-verification was already requested for this connection." : "Re-verification requested. The candidate must reconnect PASSID to restore access.")
+      : body.error ?? "Unable to request re-verification.");
+    if (res.ok) await refresh();
+  }
   if (auth.user?.role !== "admin") {
     return <section className="page"><PageTitle title="PASSID integration monitor" subtitle="Admin access is required." /><div className="notice">Log in as a CareerBridge administrator to view sanitized PASSID connection and webhook records.</div></section>;
   }
   return <section className="page"><PageTitle title="PASSID integration monitor" subtitle="Environment, sessions, connections, webhooks, and sanitized audit visibility." />
     <div className="notice">No secret keys, identity references, or webhook secrets are displayed here. Bound identities: {data?.boundIdentityCount ?? 0}. Identity conflicts: {data?.identityConflictCount ?? 0}.</div>
-    <div className="grid-2"><div className="data-panel"><h2>Connections</h2>{(data?.connections ?? []).map((c: any) => <p key={c.id}>{c.candidate_reference} · {c.status} · {c.consent_status}</p>)}</div><div className="data-panel"><h2>Webhook events</h2>{(data?.events ?? []).map((e: any) => <p key={e.id}>{e.type} · {e.id}</p>)}</div></div>
+    {message && <div className="notice">{message}</div>}
+    <div className="grid-2"><div className="data-panel"><h2>Connections</h2>{(data?.connections ?? []).map((c: any) => <div className="check-row" key={c.id}>
+      <span>{c.candidate_reference} · {c.status} · {c.consent_status}</span>
+      <button className="button secondary" type="button" disabled={c.consent_status === "revoked"} onClick={() => requestReverification(c.id)}>Request re-verification</button>
+    </div>)}</div><div className="data-panel"><h2>Webhook events</h2>{(data?.events ?? []).map((e: any) => <p key={e.id}>{e.type} · {e.id}</p>)}</div></div>
   </section>;
 }
 
