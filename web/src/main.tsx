@@ -473,12 +473,21 @@ function Verification({ auth }: { auth: any }) {
   const [apps, setApps] = useState<Application[]>([]);
   const [message, setMessage] = useState("");
   const [walletSession, setWalletSession] = useState<{ applicationTitle: string; hostedUrl: string; expiresAt?: string; requestedScopes: string[] } | null>(null);
+  const [blockedConnection, setBlockedConnection] = useState<{ applicationId: string; connectionId: string } | null>(null);
   const [params] = useSearchParams();
   useEffect(() => { api("/api/applications").then((r) => r.json()).then((b) => setApps(safeList(b.applications))); }, []);
-  async function verify(application: Application) {
+  async function verify(application: Application, reconnect = false) {
+    if (reconnect && blockedConnection?.applicationId === application.id) {
+      const revokeRes = await api(`/api/passid/connections/${blockedConnection.connectionId}/revoke`, { method: "POST" }, auth.csrf);
+      if (!revokeRes.ok) return setMessage("Unable to start a new PASSID session for this application.");
+    }
     const res = await api("/api/passid/connect/sessions", { method: "POST", body: JSON.stringify({ application_id: application.id }) }, auth.csrf);
     const body = await res.json();
-    if (!res.ok) return setMessage(authErrorMessage(body, "Unable to create PASSID session"));
+    if (!res.ok) {
+      setBlockedConnection(body.error === "passid_already_connected" && body.connection_id ? { applicationId: application.id, connectionId: body.connection_id } : null);
+      return setMessage(authErrorMessage(body, "Unable to create PASSID session"));
+    }
+    setBlockedConnection(null);
     setMessage("");
     setWalletSession({
       applicationTitle: application.title,
@@ -518,7 +527,7 @@ function Verification({ auth }: { auth: any }) {
         {walletSession.expiresAt && <small>Expires {new Date(walletSession.expiresAt).toLocaleString()}</small>}
       </div>
     </div>}
-    <div className="grid-2">{apps.length ? apps.map((app) => <div className="data-panel" key={app.id}><h2>{app.title}</h2><p>Status: {app.status}</p><p>CareerBridge requests only approved PASSID scopes for this application.</p><button className="button" onClick={() => verify(app)}>Continue with PASSID</button></div>) : <EmptyState title="No applications to verify" text="Apply to a role first, then return here to approve PASSID consent for that application." action={<Link className="button secondary" to="/jobs">Browse jobs</Link>} />}</div>
+    <div className="grid-2">{apps.length ? apps.map((app) => <div className="data-panel" key={app.id}><h2>{app.title}</h2><p>Status: {app.status}</p><p>CareerBridge requests only approved PASSID scopes for this application.</p><button className="button" onClick={() => verify(app)}>Continue with PASSID</button>{blockedConnection?.applicationId === app.id && <button className="button secondary" type="button" onClick={() => verify(app, true)}>Start a new PASSID session</button>}</div>) : <EmptyState title="No applications to verify" text="Apply to a role first, then return here to approve PASSID consent for that application." action={<Link className="button secondary" to="/jobs">Browse jobs</Link>} />}</div>
   </section>;
 }
 

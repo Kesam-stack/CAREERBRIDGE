@@ -709,6 +709,68 @@ describe("CareerBridge independent PASSID institution app", () => {
     expect(reused.headers.get("location")).toContain("invalid_state");
   });
 
+  it("lets a candidate revoke and restart PASSID Connect on the same application, for repeated demo verification", async () => {
+    const auth = await login(app, "amara@careerbridge.test");
+    const application = await applyToDemoJob(app, auth);
+
+    await app.request("/api/passid/connect/sessions", {
+      method: "POST",
+      headers: { Cookie: auth.cookie, "Content-Type": "application/json", "X-CSRF-Token": auth.csrf },
+      body: JSON.stringify({ application_id: application.id }),
+    });
+    const firstSessionRow = db.prepare("SELECT * FROM passid_sessions WHERE application_id=?").get(application.id) as any;
+    const firstState = "state_demo_round_1";
+    db.prepare("UPDATE passid_sessions SET state_hash=? WHERE id=?").run(hmac(firstState, baseEnv.SESSION_SECRET), firstSessionRow.id);
+    const firstCallback = await app.request(`/api/passid/callback?state=${firstState}`, { redirect: "manual" });
+    expect(firstCallback.headers.get("location")).toContain("result=success");
+
+    const blocked = await app.request("/api/passid/connect/sessions", {
+      method: "POST",
+      headers: { Cookie: auth.cookie, "Content-Type": "application/json", "X-CSRF-Token": auth.csrf },
+      body: JSON.stringify({ application_id: application.id }),
+    });
+    expect(blocked.status).toBe(409);
+    const blockedBody = await blocked.json() as any;
+    expect(blockedBody.error).toBe("passid_already_connected");
+    const connectionId = blockedBody.connection_id as string;
+
+    const revoke = await app.request(`/api/passid/connections/${connectionId}/revoke`, {
+      method: "POST",
+      headers: { Cookie: auth.cookie, "X-CSRF-Token": auth.csrf },
+    });
+    expect(revoke.status).toBe(200);
+
+    const secondSession = await app.request("/api/passid/connect/sessions", {
+      method: "POST",
+      headers: { Cookie: auth.cookie, "Content-Type": "application/json", "X-CSRF-Token": auth.csrf },
+      body: JSON.stringify({ application_id: application.id }),
+    });
+    expect(secondSession.status).toBe(200);
+    const secondBody = await secondSession.json() as any;
+    expect(secondBody.reused).toBeUndefined();
+
+    const secondSessionRow = db.prepare("SELECT * FROM passid_sessions WHERE application_id=? ORDER BY created_at DESC LIMIT 1").get(application.id) as any;
+    const secondState = "state_demo_round_2";
+    db.prepare("UPDATE passid_sessions SET state_hash=? WHERE id=?").run(hmac(secondState, baseEnv.SESSION_SECRET), secondSessionRow.id);
+    const secondCallback = await app.request(`/api/passid/callback?state=${secondState}`, { redirect: "manual" });
+    expect(secondCallback.headers.get("location")).toContain("result=success");
+  });
+
+  it("raises the PASSID Connect session rate limit for sandbox so client demos aren't throttled", async () => {
+    const auth = await login(app, "amara@careerbridge.test");
+    const application = await applyToDemoJob(app, auth);
+    // The same still-pending session is reused (and still counted against the rate limit) on
+    // every call, so looping past the old production limit of 10 proves the sandbox bump to 50.
+    for (let i = 0; i < 12; i++) {
+      const res = await app.request("/api/passid/connect/sessions", {
+        method: "POST",
+        headers: { Cookie: auth.cookie, "Content-Type": "application/json", "X-CSRF-Token": auth.csrf },
+        body: JSON.stringify({ application_id: application.id }),
+      });
+      expect(res.status).toBe(200);
+    }
+  });
+
   it("uses PKCE and exchanges the one-time code before trusting a live callback", async () => {
     const liveDb = new Database(":memory:");
     migrate(liveDb);

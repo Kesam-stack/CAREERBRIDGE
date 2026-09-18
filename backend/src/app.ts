@@ -956,12 +956,15 @@ export function createCareerBridgeApp(options: AppOptions = {}) {
     const existingConnection = db.prepare("SELECT id,status,consent_status FROM passid_connections WHERE application_id=? AND candidate_user_id=? AND consent_status NOT IN ('revoked','expired') ORDER BY created_at DESC LIMIT 1")
       .get(appRow.id, user.id) as any;
     if (existingConnection) return c.json({ error: "passid_already_connected", connection_id: existingConnection.id }, 409);
-    const connectLimit = consumeRateLimit("passid_session", user.id, 10, 1000 * 60 * 60);
+    // Sandbox runs power client demos where the same application is verified repeatedly in quick
+    // succession; live keeps the tighter production-tuned limits.
+    const isSandbox = env.PASSID_ENVIRONMENT === "sandbox";
+    const connectLimit = consumeRateLimit("passid_session", user.id, isSandbox ? 50 : 10, 1000 * 60 * 60);
     if (!connectLimit.allowed) {
       c.header("Retry-After", String(connectLimit.retryAfterSeconds));
       return c.json({ error: "passid_session_rate_limited", retry_after_seconds: connectLimit.retryAfterSeconds }, 429);
     }
-    const networkConnectLimit = consumeRateLimit("passid_session_network", clientAddress(c), 60, 1000 * 60 * 60);
+    const networkConnectLimit = consumeRateLimit("passid_session_network", clientAddress(c), isSandbox ? 300 : 60, 1000 * 60 * 60);
     if (!networkConnectLimit.allowed) {
       c.header("Retry-After", String(networkConnectLimit.retryAfterSeconds));
       return c.json({ error: "passid_session_rate_limited", retry_after_seconds: networkConnectLimit.retryAfterSeconds }, 429);
